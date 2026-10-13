@@ -967,6 +967,8 @@ struct App {
     /// This window on the session bus, for the tray icon's menu. Joined after
     /// the first frame, so the bus is never in the way of the first picture.
     presence: Option<crate::tray::Presence>,
+    /// Keeps the screensaver off while a video plays.
+    awake: crate::awake::Awake,
     /// The open windows, as the list the filename drops down: each row's
     /// span within it and the window it raises, and whether it is down.
     peer_list: Option<(Overlay, Vec<(i32, i32, String)>)>,
@@ -1110,6 +1112,7 @@ impl App {
             browser: None,
             browser_overlay: None,
             video: None,
+            awake: crate::awake::Awake::new(),
             next_frame: None,
             playback_origin: None,
             paused: false,
@@ -5794,6 +5797,8 @@ impl ApplicationHandler<UserEvent> for App {
         // Browsing away from a playing video has to be able to interrupt it,
         // so the preview is checked before the frame deadline claims the loop.
         self.tick_pending_preview();
+        // A film is watched, not touched: keep the screen on while one plays.
+        self.awake.set(self.video.is_some() && !self.paused && !self.playback_ended);
         self.update_watch();
         self.tick_subtitles();
         self.tick_backfill();

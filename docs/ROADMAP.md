@@ -8,6 +8,8 @@ commit. When every item in a release section is ticked, bump `version` in
 `Cargo.toml`, move the section's items into the release notes, and push a tag
 `vX.Y.Z`; CI builds and publishes the release from the tag.
 
+Linux only: no other platform is planned.
+
 Released: **v1.1.0** (2026-10-13).
 
 ## v1.2.0 (next)
@@ -21,6 +23,9 @@ Released: **v1.1.0** (2026-10-13).
 - [ ] Subtitle cue retention: a backward seek of more than 30 s loses captions;
       replace the fixed `KEEP` window in `src/subtitles.rs` (Next #4).
 - [ ] Neighbour prefetch for the single-image view (Measured #2).
+- [x] Keep the screensaver off while a video plays (`src/awake.rs`).
+- [ ] Check on K11 that the screen stays on through a video, and blanks again
+      when paused.
 - [x] Docs: audio clock already re-anchors on seek; update the stale note in
       `BACKLOG.md` (Next #1).
 
