@@ -1,0 +1,70 @@
+# Build, test, and package show on every push. A pushed tag `v*` also
+# publishes the binary as a GitHub release.
+#
+# FFmpeg is vendored and built from source (tools/build-ffmpeg.sh); vendor/ is
+# not committed, so it is built here and cached on the script's hash.
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  linux:
+    # The oldest supported runner, so the binary's glibc floor stays low.
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: System packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config cmake nasm clang libclang-dev \
+            libva-dev libx11-dev libxcb1-dev libxkbcommon-dev \
+            libwayland-dev libasound2-dev libdbus-1-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache FFmpeg
+        id: ffmpeg
+        uses: actions/cache@v4
+        with:
+          path: vendor/ffmpeg9
+          key: ffmpeg-${{ runner.os }}-22.04-${{ hashFiles('tools/build-ffmpeg.sh') }}
+
+      - name: Build FFmpeg
+        if: steps.ffmpeg.outputs.cache-hit != 'true'
+        run: tools/build-ffmpeg.sh
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Test
+        run: cargo test
+
+      - name: Build release
+        run: cargo build --release
+
+      - name: Package
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          mkdir -p dist
+          tar -C target/release -czf "dist/show-${version}-linux-x86_64.tar.gz" show
+          ls -l dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: show-linux-x86_64
+          path: dist/*.tar.gz
+
+      - name: Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.tar.gz
