@@ -1011,8 +1011,10 @@ Ordered by payoff, with the measurement that justifies each.
 2. ~~**Multi-file navigation**~~ — built, along with the detailed view
    (`browser.rs`), the mosaic grid, similarity grouping (`similarity.rs`) and a
    persistent thumbnail cache that also reads the desktop's own
-   (`thumbs.rs`). Neighbour **prefetch** for the single-image view is still
-   open; the grid has its own.
+   (`thumbs.rs`). The single-image view reads the next image ahead once the
+   current one is on screen: one image, in the direction of the last step, at
+   first-paint resolution, on a low-priority thread, and dropped if it is over
+   the speculative full-size budget. Videos are not read ahead.
 3. **Parallel JPEG entropy decode.** Entropy decoding is the floor that DCT
    scaling cannot cut: 84 ms -> 38 ms is the whole range on a 48 MP file.
    Baseline JPEGs with restart markers can be split across cores.

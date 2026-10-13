@@ -22,7 +22,9 @@ Released: **v1.1.0** (2026-10-13).
       opens, disk size (`show --tiles <file>`).
 - [x] Subtitle cue retention: a backward seek of more than 30 s loses captions;
       replace the fixed `KEEP` window in `src/subtitles.rs` (Next #4).
-- [ ] Neighbour prefetch for the single-image view (Measured #2).
+- [x] Neighbour prefetch for the single-image view (Measured #2).
+- [ ] Check on K11 that stepping through a folder feels instant one way and
+      the other.
 - [x] Keep the screensaver off while a video plays (`src/awake.rs`).
 - [ ] Check on K11 that the screen stays on through a video, and blanks again
       when paused.

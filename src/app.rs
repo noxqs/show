@@ -367,6 +367,8 @@ enum UserEvent {
     Preview(Generation, Box<Result<Loaded>>),
     /// Full resolution, loaded behind the preview.
     Full(Generation, Box<Result<Loaded>>),
+    /// The image after this one, read ahead while nothing else is happening.
+    Neighbour(PathBuf, Box<Result<Loaded>>),
     /// Instance, adapter and device, built off the main thread.
     GpuReady(Box<Result<Core>>),
     /// One grid cell, decoded at cell resolution.
@@ -715,6 +717,11 @@ struct App {
     pending: Option<(Loaded, bool)>,
     shown: Option<Displayed>,
     full_res: FullRes,
+    /// The image the next step will land on, read ahead: its path, and the
+    /// result once it is in. See [`App::prefetch_neighbour`].
+    neighbour: Option<(PathBuf, Option<Loaded>)>,
+    /// Which way the last step went, so the read-ahead follows it.
+    step_dir: isize,
     view: View,
     cursor: (f32, f32),
     dragging: bool,
@@ -1045,6 +1052,8 @@ impl App {
             pending: None,
             shown: None,
             full_res: FullRes::NotNeeded,
+            neighbour: None,
+            step_dir: 1,
             view,
             cursor: (0.0, 0.0),
             dragging: false,
@@ -1552,6 +1561,9 @@ impl App {
         if !self.playlist.step(delta) {
             return;
         }
+        if delta != 0 {
+            self.step_dir = delta.signum();
+        }
         self.start_current();
     }
 
@@ -1599,7 +1611,40 @@ impl App {
         if !self.config.hold_zoom {
             self.view.fitting = true;
         }
+        // Read ahead already: handed over as if it had just been decoded, so
+        // everything after is the same path a fresh load takes.
+        if let Some((ahead, Some(loaded))) = self.neighbour.take()
+            && ahead == path
+        {
+            let _ = self.proxy.send_event(UserEvent::Preview(self.generation, Box::new(Ok(loaded))));
+            return;
+        }
         spawn_load(&self.proxy, path, self.args.io, self.args.preview, false, self.generation);
+    }
+
+    /// Read the image the next step will land on, once the current one is up.
+    ///
+    /// One image, in the direction of travel, at the same resolution the first
+    /// paint uses, on a low-priority thread: what pressing next would decode
+    /// anyway, done while the person is still looking. A film is never read
+    /// ahead, nor anything bigger than the speculative full-size budget.
+    fn prefetch_neighbour(&mut self) {
+        if self.video.is_some() || self.playlist.len() < 2 {
+            return;
+        }
+        let n = self.playlist.len() as isize;
+        let index = ((self.playlist.position() as isize + self.step_dir) % n + n) % n;
+        let Some(path) = self.playlist.at(index as usize).map(|p| p.to_path_buf()) else { return };
+        if crate::video::is_video(&path) || self.neighbour.as_ref().is_some_and(|(p, _)| *p == path) {
+            return;
+        }
+        self.neighbour = Some((path.clone(), None));
+        let (proxy, io, target) = (self.proxy.clone(), self.args.io, self.args.preview);
+        let _ = std::thread::Builder::new().name("read-ahead".into()).spawn(move || {
+            background_priority();
+            let result = Box::new(loader::load(&path, io, target));
+            let _ = proxy.send_event(UserEvent::Neighbour(path, result));
+        });
     }
 
     fn stop_video(&mut self) {
@@ -5807,6 +5852,7 @@ impl App {
             self.build_status_badge();
             self.redraw();
             self.maybe_prefetch_full_res();
+            self.prefetch_neighbour();
         }
     }
 }
@@ -6051,6 +6097,17 @@ impl ApplicationHandler<UserEvent> for App {
             }
             UserEvent::FolderChanged => {
                 self.rescan_folder();
+                return;
+            }
+            UserEvent::Neighbour(path, result) => {
+                // Kept only if it is still the one wanted, and not so big that
+                // holding it on spec would crowd out what is on screen.
+                if let (Some((wanted, slot)), Ok(loaded)) = (self.neighbour.as_mut(), *result)
+                    && *wanted == path
+                    && loaded.decoded.rgba.len() as u64 <= SPECULATIVE_FULL_RES_BUDGET
+                {
+                    *slot = Some(loaded);
+                }
                 return;
             }
             UserEvent::Peers => {
