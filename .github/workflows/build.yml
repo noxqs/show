@@ -68,3 +68,6 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: dist/*.tar.gz
+          # A tag with a dash, like v1.2.0-rc1, is a test build: published, but
+          # not offered as the latest release.
+          prerelease: ${{ contains(github.ref_name, '-') }}
