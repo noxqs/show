@@ -50,9 +50,9 @@ adapter benchmark to the integrated Radeon by 2.2x.
    `show --audio FILE`, which plays at zero gain and reports the clock —
    3.05 s of audio in 3.01 s of wall clock.
 
-   Still open here: the clock is anchored once per file, so it has no seek
-   path yet, and multichannel sources are downmixed to stereo by swresample
-   rather than by a mixing matrix we choose.
+   The clock is re-anchored on a seek, and the device flushed. Still open:
+   multichannel sources are downmixed to stereo by swresample rather than by a
+   mixing matrix we choose.
 2. ~~**Seeking.**~~ **Built.** Plain arrows step keyframe to keyframe, ctrl
    moves 10 s and shift 30 s; both ends are walls rather than doors.
 
@@ -951,10 +951,9 @@ is a rendering problem, and this is how the two are told apart.
 
 Ordered by payoff, with the measurement that justifies each.
 
-1. **Tiled / pyramidal rendering — reader done, renderer parked.**
-
-   `src/tiled.rs` reads pyramid levels and individual tiles, and is verified
-   against all three real file shapes via `show --tiles <file>`:
+1. ~~**Tiled / pyramidal rendering**~~ — **built.** `src/tiled.rs` reads
+   pyramid levels and individual tiles, and is verified against all three real
+   file shapes via `show --tiles <file>`:
 
    | file | geometry | tile read |
    |---|---|---|
@@ -962,8 +961,11 @@ Ordered by payoff, with the measurement that justifies each.
    | 1955 mosaic | 52416x34080, no pyramid, deflate | 10.5 ms |
    | 1982 Soviet plan | 23585x18939, no pyramid, deflate | 16.6 ms |
 
-   Still to build: tile cache, drawing tiles rather than one texture, switching
-   level on zoom, and the tile readout in the top-left badge.
+   `src/tiles.rs` plans which level and tiles a view needs, reads them on a
+   pool of threads (each new plan replacing the queue), and keeps them on the
+   card under a budget, least recently used out first. Missing tiles borrow
+   from finer or coarser ones already there. The debug badge says which level
+   is drawn and how many of its tiles are in.
 
    **Two things to remember when picking this up.**
 
@@ -976,11 +978,19 @@ Ordered by payoff, with the measurement that justifies each.
    GDAL-written WebP COGs largely unreadable. If a fixed `tiff` ships, the
    workaround in `TileReader::read_webp` can go.
 
-   *The files without a pyramid are the hard case.* A screenful at native zoom
-   is fine, but zooming out on the 1955 mosaic means all 6,901 tiles at 10.5 ms
-   — about 72 seconds — and there is no coarser level to drop to. Either
-   subsample (every Nth tile, sparse but instant) or build a pyramid once and
-   cache it. Subsampling first: no cache, no waiting.
+   *Files without a pyramid get one, once.* Zoomed out, the 1955 mosaic means
+   all 6,901 tiles at 10.5 ms — about 72 seconds of decoding — and zooming in
+   from there had only the full-size level to drop to. Subsampling was weighed
+   and dropped: it would show a gappy stand-in. Instead the first open, which
+   reads every tile for the overview anyway, also stores halved levels in
+   `~/.cache/show/pyramids/` (`src/pyramid.rs`), and every later open reads
+   those as the file's own pyramid. Checked against the source by size and
+   modification time; 8 GB budget, least recently used dropped first.
+
+   Measured on a synthetic 24000x16000 deflate file, 4 cores: the first open
+   goes from 1.3 s to 1.8 s, and memory from 395 MB to 590 MB. Not yet measured
+   on the real files: `show --tiles <file>` reports the first-open time and the
+   stored levels.
 2. ~~**Multi-file navigation**~~ — built, along with the detailed view
    (`browser.rs`), the mosaic grid, similarity grouping (`similarity.rs`) and a
    persistent thumbnail cache that also reads the desktop's own

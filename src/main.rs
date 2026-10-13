@@ -24,6 +24,7 @@ mod panel;
 mod playlist;
 mod plugins;
 mod profile;
+mod pyramid;
 mod scale;
 mod screenshot;
 mod sha256;
@@ -2177,21 +2178,36 @@ fn compare_folder(dir: &std::path::Path, args: &cli::Args) -> anyhow::Result<()>
 /// Describe a tiled image's pyramid and time reading a tile from each level.
 fn report_tiles(path: &std::path::Path) -> anyhow::Result<()> {
     let start = std::time::Instant::now();
-    let Some(pyramid) = tiled::probe(path)? else {
+    let Some(mut pyramid) = tiled::probe(path)? else {
         anyhow::bail!("{} is not a tiled image", path.display());
     };
     println!("probed in {:.1} ms", start.elapsed().as_secs_f64() * 1e3);
 
+    // No pyramid: open it the way the viewer does, which stores levels for a
+    // file big enough to need them, and time that first open.
+    if !pyramid.is_pyramidal() {
+        let t = std::time::Instant::now();
+        if tiled::overview(path, None)?.is_some() {
+            println!("first open, storing levels: {:.1} s", t.elapsed().as_secs_f64());
+            pyramid = tiled::probe(path)?.unwrap_or(pyramid);
+        }
+    }
+
     let (fw, fh) = pyramid.full_size();
+    let stored = pyramid.levels.iter().filter(|l| l.cached.is_some()).count();
     println!(
         "{}\n  {fw}x{fh}, {} level(s){}\n",
         path.display(),
         pyramid.levels.len(),
-        if pyramid.is_pyramidal() { "" } else { " (no pyramid)" }
+        match (pyramid.is_pyramidal(), stored) {
+            (false, _) => " (no pyramid)".to_string(),
+            (true, 0) => String::new(),
+            (true, n) => format!(" ({n} stored)"),
+        }
     );
     println!("  {:>5} {:>16} {:>12} {:>10} {:>9} {:>10}", "level", "size", "tiles", "scale", "read ms", "tile");
 
-    let mut reader = tiled::TileReader::open(path)?;
+    let mut reader = tiled::TileReader::open(&pyramid)?;
     for (i, level) in pyramid.levels.iter().enumerate() {
         let (across, down) = level.grid();
         // A tile from the middle, where a partial edge tile cannot flatter the
@@ -2229,7 +2245,7 @@ fn report_tiles(path: &std::path::Path) -> anyhow::Result<()> {
     for (what, zoom) in [("fit", fit), ("1/4", 0.26), ("1:1", 1.0)] {
         let plan = tiles::plan(&pyramid, zoom, [fw as f32 / 2.0, fh as f32 / 2.0], screen);
         let (tx, rx) = std::sync::mpsc::channel();
-        let loader = tiles::TileLoader::new(path.to_path_buf(), pyramid.clone(), 8, move |key, tile| {
+        let loader = tiles::TileLoader::new(pyramid.clone(), 8, move |key, tile| {
             let _ = tx.send((key, tile.is_ok()));
         });
         let t = std::time::Instant::now();

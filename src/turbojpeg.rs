@@ -25,8 +25,9 @@ const CS_YCCK: c_int = 4;
 /// typically a truncated scan. The same leniency the other decoders show.
 const ERR_WARNING: c_int = 0;
 
-/// A decompressor, destroyed on drop so no error path can leak it. Not shared
-/// between threads: a handle is not thread-safe, and making one is cheap.
+/// A compressor or decompressor, destroyed on drop so no error path can leak
+/// it. Not shared between threads: a handle is not thread-safe, and making one
+/// is cheap.
 struct Handle(tj::tjhandle);
 
 impl Handle {
@@ -119,4 +120,42 @@ pub fn decode(bytes: &[u8], target: Option<Target>) -> Result<Decoded> {
         path: "libjpeg-turbo",
         tiles: None,
     })
+}
+
+/// Encode RGBA8 pixels as a 4:2:0 JPEG, alpha ignored. `pitch` is the bytes
+/// from the start of one row to the next, so a tile can be encoded straight
+/// out of a wider band of rows without copying it out first.
+pub fn encode(rgba: &[u8], width: u32, height: u32, pitch: usize, quality: u8) -> Result<Vec<u8>> {
+    if width == 0 || height == 0 || rgba.len() < pitch * (height as usize - 1) + width as usize * 4 {
+        bail!("libjpeg-turbo encode: {width}x{height} does not fit the pixels given");
+    }
+    let handle = Handle(unsafe { tj::tjInitCompress() });
+    if handle.0.is_null() {
+        bail!("libjpeg-turbo could not make a compressor");
+    }
+    let samp = tj::TJSAMP_TJSAMP_420 as c_int;
+    // The worst case for this size, so the library never has to grow it.
+    let capacity = unsafe { tj::tjBufSize(width as c_int, height as c_int, samp) };
+    let mut out = vec![0u8; capacity as usize];
+    let (mut ptr, mut size) = (out.as_mut_ptr(), capacity);
+    let rc = unsafe {
+        tj::tjCompress2(
+            handle.0,
+            rgba.as_ptr(),
+            width as c_int,
+            pitch as c_int,
+            height as c_int,
+            tj::TJPF_TJPF_RGBA as c_int,
+            &mut ptr,
+            &mut size,
+            samp,
+            quality as c_int,
+            tj::TJFLAG_NOREALLOC as c_int,
+        )
+    };
+    if rc != 0 {
+        bail!("libjpeg-turbo encode: {}", handle.error());
+    }
+    out.truncate(size as usize);
+    Ok(out)
 }

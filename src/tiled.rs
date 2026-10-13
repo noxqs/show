@@ -10,16 +10,14 @@
 //! resolutions, one per IFD. Choosing a level by zoom and fetching a handful of
 //! tiles turns an impossible image into an ordinary one.
 //!
-//! Files without a pyramid still work — there is simply only one level, and
-//! zooming out has to subsample rather than drop down.
-
-// The reader is finished and verified against real gigapixel files; the
-// renderer that would use it is parked. See docs/BACKLOG.md.
-#![allow(dead_code)]
+//! Files without a pyramid still work. The first time a large one is opened,
+//! the pass that reads it for its overview also stores halved levels of it
+//! (`src/pyramid.rs`), and from then on those are its pyramid.
 
 use std::fs::File;
 use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
 use tiff::decoder::Decoder;
@@ -35,6 +33,9 @@ pub struct Level {
     /// Tile dimensions. For a stripped file this is the full width by the
     /// strip height, which the tile machinery handles unchanged.
     pub tile: (u32, u32),
+    /// Set for a level read from a stored pyramid rather than the file: its
+    /// index there. See `src/pyramid.rs`.
+    pub cached: Option<usize>,
 }
 
 impl Level {
@@ -62,6 +63,8 @@ pub struct Pyramid {
     pub path: PathBuf,
     /// Largest first, which is also IFD order in every pyramidal file seen.
     pub levels: Vec<Level>,
+    /// The levels stored for a file that came without them, if any.
+    pub cache: Option<Arc<crate::pyramid::Index>>,
 }
 
 impl Pyramid {
@@ -90,11 +93,24 @@ impl Pyramid {
     }
 }
 
-/// Read the level structure without decoding any pixels.
+/// Read the level structure without decoding any pixels, along with any levels
+/// stored for a file that has none of its own.
 ///
 /// Returns `None` for a TIFF we cannot usefully tile, so the caller can fall
 /// back to decoding it whole.
 pub fn probe(path: &Path) -> Result<Option<Pyramid>> {
+    let Some(mut pyramid) = probe_file(path)? else { return Ok(None) };
+    if !pyramid.is_pyramidal()
+        && let Some(index) = crate::pyramid::lookup(path, pyramid.full_size())
+    {
+        pyramid.levels.extend(index.as_levels());
+        pyramid.cache = Some(Arc::new(index));
+    }
+    Ok(Some(pyramid))
+}
+
+/// As [`probe`], but only the levels in the file itself.
+pub fn probe_file(path: &Path) -> Result<Option<Pyramid>> {
     let file = File::open(path).with_context(|| format!("opening {}", path.display()))?;
     let mut decoder = match Decoder::new(BufReader::new(file)) {
         Ok(d) => d,
@@ -114,7 +130,7 @@ pub fn probe(path: &Path) -> Result<Option<Pyramid>> {
         };
         let (tw, th) = decoder.chunk_dimensions();
         if tw > 0 && th > 0 {
-            levels.push(Level { ifd, width, height, tile: (tw, th) });
+            levels.push(Level { ifd, width, height, tile: (tw, th), cached: None });
         }
 
         if !decoder.more_images() {
@@ -135,7 +151,7 @@ pub fn probe(path: &Path) -> Result<Option<Pyramid>> {
     }
     // Largest first regardless of how the file ordered its directories.
     levels.sort_by(|a, b| b.width.cmp(&a.width));
-    Ok(Some(Pyramid { path: path.to_path_buf(), levels }))
+    Ok(Some(Pyramid { path: path.to_path_buf(), levels, cache: None }))
 }
 
 /// Reads tiles from one file.
@@ -150,6 +166,8 @@ pub struct TileReader {
     /// Set when the current level stores WebP tiles, which have to be decoded
     /// here rather than by the tiff crate. See [`WebpLevel`].
     webp: Option<WebpLevel>,
+    /// The stored levels, and a handle on their file once one is read.
+    cache: Option<(Arc<crate::pyramid::Index>, Option<File>)>,
 }
 
 /// Tile locations for a WebP-compressed level.
@@ -168,14 +186,16 @@ struct WebpLevel {
 }
 
 impl TileReader {
-    pub fn open(path: &Path) -> Result<TileReader> {
+    pub fn open(pyramid: &Pyramid) -> Result<TileReader> {
+        let path = pyramid.path.as_path();
         let file = File::open(path).with_context(|| format!("opening {}", path.display()))?;
         let decoder = Decoder::new(BufReader::new(file))
             .with_context(|| format!("reading {} as TIFF", path.display()))?
             .with_limits(tiff::decoder::Limits::unlimited());
         let raw = File::open(path).with_context(|| format!("opening {}", path.display()))?;
 
-        let mut reader = TileReader { decoder, at_ifd: 0, raw, webp: None };
+        let cache = pyramid.cache.clone().map(|index| (index, None));
+        let mut reader = TileReader { decoder, at_ifd: 0, raw, webp: None, cache };
         reader.prepare_level(0)?;
         Ok(reader)
     }
@@ -248,6 +268,13 @@ impl TileReader {
 
     /// Fetch one tile, converted to RGBA8.
     pub fn read(&mut self, level: &Level, tx: u32, ty: u32) -> Result<Tile> {
+        if let Some(stored) = level.cached {
+            let Some((index, file)) = self.cache.as_mut() else { bail!("no stored levels to read") };
+            if file.is_none() {
+                *file = Some(File::open(&index.file).with_context(|| format!("opening {}", index.file.display()))?);
+            }
+            return index.read(file.as_mut().unwrap(), stored, tx, ty);
+        }
         if self.at_ifd != level.ifd {
             self.decoder
                 .seek_to_image(level.ifd)
@@ -349,6 +376,7 @@ mod tests {
 
     fn pyramid(sizes: &[(u32, u32)]) -> Pyramid {
         Pyramid {
+            cache: None,
             path: PathBuf::from("test.tif"),
             levels: sizes
                 .iter()
@@ -358,6 +386,7 @@ mod tests {
                     width: *width,
                     height: *height,
                     tile: (256, 256),
+                    cached: None,
                 })
                 .collect(),
         }
@@ -365,10 +394,10 @@ mod tests {
 
     #[test]
     fn the_tile_grid_covers_every_pixel() {
-        let level = Level { ifd: 0, width: 1000, height: 700, tile: (256, 256) };
+        let level = Level { ifd: 0, width: 1000, height: 700, tile: (256, 256), cached: None };
         assert_eq!(level.grid(), (4, 3), "partial tiles still need a column and a row");
 
-        let exact = Level { ifd: 0, width: 512, height: 256, tile: (256, 256) };
+        let exact = Level { ifd: 0, width: 512, height: 256, tile: (256, 256), cached: None };
         assert_eq!(exact.grid(), (2, 1));
     }
 
@@ -422,13 +451,29 @@ const OVERVIEW_LIMIT: u32 = 8192;
 pub fn overview(path: &Path, target: Option<crate::decode::Target>) -> Result<Option<crate::decode::Decoded>> {
     use rayon::prelude::*;
 
-    let Some(pyramid) = probe(path)? else { return Ok(None) };
+    let Some(mut pyramid) = probe(path)? else { return Ok(None) };
     let (fw, fh) = pyramid.full_size();
     let huge = fw > OVERVIEW_LIMIT || fh > OVERVIEW_LIMIT;
     if !pyramid.is_pyramidal() && !huge {
         return Ok(None);
     }
     let mut span = crate::timing::span("decode", "tiff_overview");
+
+    // Too big to show without levels and with none of its own: this is the
+    // one pass over every tile, so it stores levels while it is at it. Where
+    // that fails, the overview is made from the full-size tiles as before.
+    if !pyramid.is_pyramidal() {
+        let mut built = crate::timing::span("decode", "tiff_pyramid");
+        match crate::pyramid::build(&pyramid) {
+            Ok(Some(index)) => {
+                built.note(format!("{} levels stored", index.levels.len()));
+                pyramid.levels.extend(index.as_levels());
+                pyramid.cache = Some(Arc::new(index));
+            }
+            Ok(None) => {}
+            Err(e) => eprintln!("show: storing levels of {}: {e:#}", path.display()),
+        }
+    }
 
     let target = target.unwrap_or(crate::decode::Target { width: OVERVIEW_LIMIT, height: OVERVIEW_LIMIT });
     let factor = crate::decode::factor_for_target(fw, fh, target).max(1) as f32;
@@ -455,7 +500,7 @@ pub fn overview(path: &Path, target: Option<crate::decode::Target>) -> Result<Op
     let strips: Vec<Result<Vec<u8>>> = (0..down)
         .into_par_iter()
         .map(|ty| {
-            let mut reader = TileReader::open(path)?;
+            let mut reader = TileReader::open(&pyramid)?;
             let rows = (level.height - ty * level.tile.1).min(level.tile.1).div_ceil(f);
             let mut strip = vec![0u8; ow as usize * rows as usize * 4];
             for tx in 0..across {

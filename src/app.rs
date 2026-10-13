@@ -86,10 +86,11 @@ struct Tiling {
     drawing: Option<(usize, usize, usize)>,
 }
 
-/// A backstop, not a working limit: a file without a pyramid, zoomed out to
-/// just past its overview, is drawn from its full-size tiles — the 1955 mosaic
-/// needs some 1,300 there, and uses the card memory that takes. Only a view
-/// needing more than this falls back to the overview.
+/// A backstop, not a working limit: a large file without a pyramid of its own
+/// is given stored levels the first time it is opened (`src/pyramid.rs`), so a
+/// screen needs a few dozen tiles at any zoom. Only a view needing more than
+/// this — a file whose levels could not be stored — falls back to the
+/// overview.
 const MAX_TILES_ON_SCREEN: usize = 6000;
 
 /// Where a press lands on the window switcher.
@@ -2452,13 +2453,12 @@ impl App {
             self.tiling = None;
             return false;
         };
-        // Only the levels the file has. One without a pyramid is drawn from
-        // its full-size tiles at every zoom past the overview: more tiles and
-        // more card memory zoomed out, rather than making levels on the fly.
+        // The levels the file has, and any stored for it: loading it made
+        // them, if it is large and came without.
         let pyramid = Arc::new(pyramid);
         let (proxy, generation) = (self.proxy.clone(), self.generation);
         let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).clamp(2, 8);
-        let loader = crate::tiles::TileLoader::new(path.to_path_buf(), pyramid.clone(), threads, move |key, tile| {
+        let loader = crate::tiles::TileLoader::new(pyramid.clone(), threads, move |key, tile| {
             let _ = proxy.send_event(UserEvent::Tile(generation, key, Box::new(tile)));
         });
         self.tiling = Some(Tiling {

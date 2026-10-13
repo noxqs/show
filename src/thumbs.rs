@@ -39,7 +39,7 @@ const QUALITY: u8 = 85;
 /// FNV-1a rather than the standard library's hasher: `DefaultHasher` is
 /// explicitly not stable between releases, and a cache keyed by it would
 /// silently invalidate itself on a compiler upgrade.
-fn hash_path(path: &Path) -> String {
+pub(crate) fn hash_path(path: &Path) -> String {
     fn fnv1a(bytes: impl Iterator<Item = u8>) -> u64 {
         let mut h: u64 = 0xcbf2_9ce4_8422_2325;
         for b in bytes {
