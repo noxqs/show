@@ -12,15 +12,16 @@ Released: **v1.1.0** (2026-10-13).
 
 ## v1.2.0 (next)
 
-- [ ] Tiled / pyramidal renderer: tile cache, draw tiles instead of one texture,
-      switch level on zoom, tile readout in the badge (Measured #1). *In progress
-      on K11.*
-- [ ] Files without a pyramid: subsample tiles when zoomed out, so the 1955
-      mosaic does not take ~72 s (Measured #1).
+- [x] Tiled / pyramidal renderer: tile cache, draw tiles instead of one texture,
+      switch level on zoom, tile readout in the badge (Measured #1).
+- [x] Files without a pyramid: store halved levels on first open, so zooming
+      out or in no longer reads every full-size tile (Measured #1).
+- [ ] Measure the stored pyramid on the real files on K11: first open, later
+      opens, disk size (`show --tiles <file>`).
 - [ ] Subtitle cue retention: a backward seek of more than 30 s loses captions;
       replace the fixed `KEEP` window in `src/subtitles.rs` (Next #4).
 - [ ] Neighbour prefetch for the single-image view (Measured #2).
-- [ ] Docs: audio clock already re-anchors on seek; update the stale note in
+- [x] Docs: audio clock already re-anchors on seek; update the stale note in
       `BACKLOG.md` (Next #1).
 
 ## v1.3.0

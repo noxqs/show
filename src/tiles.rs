@@ -17,7 +17,6 @@
 //! it is blurry rather than missing.
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::path::PathBuf;
 use std::sync::{Arc, Condvar, Mutex};
 
 use crate::tiled::{Level, Pyramid, Tile, TileReader};
@@ -279,7 +278,6 @@ impl TileLoader {
     /// `on_tile` is called on a worker thread with each tile as it is read —
     /// in the viewer, to post it to the event loop.
     pub fn new(
-        path: PathBuf,
         pyramid: Arc<Pyramid>,
         threads: usize,
         on_tile: impl Fn(TileKey, anyhow::Result<Tile>) + Send + Sync + 'static,
@@ -291,11 +289,10 @@ impl TileLoader {
         let on_tile = Arc::new(on_tile);
         let workers = (0..threads.max(1))
             .map(|i| {
-                let (shared, on_tile, path, pyramid) =
-                    (shared.clone(), on_tile.clone(), path.clone(), pyramid.clone());
+                let (shared, on_tile, pyramid) = (shared.clone(), on_tile.clone(), pyramid.clone());
                 std::thread::Builder::new()
                     .name(format!("tiles-{i}"))
-                    .spawn(move || worker(&path, &pyramid, &shared, &*on_tile))
+                    .spawn(move || worker(&pyramid, &shared, &*on_tile))
                     .expect("spawning a tile reader")
             })
             .collect();
@@ -332,7 +329,6 @@ impl Drop for TileLoader {
 }
 
 fn worker(
-    path: &std::path::Path,
     pyramid: &Pyramid,
     shared: &(Mutex<Queue>, Condvar),
     on_tile: &(dyn Fn(TileKey, anyhow::Result<Tile>) + Send + Sync),
@@ -359,7 +355,7 @@ fn worker(
         let level: Level = pyramid.levels[key.level];
         let result = match reader.as_mut() {
             Some(r) => r.read(&level, key.tx, key.ty),
-            None => TileReader::open(path).and_then(|mut r| {
+            None => TileReader::open(pyramid).and_then(|mut r| {
                 let tile = r.read(&level, key.tx, key.ty);
                 reader = Some(r);
                 tile
@@ -373,13 +369,14 @@ fn worker(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
 
     /// 1024 x 512 at full size, halving three times, 256-pixel tiles.
     fn pyramid() -> Pyramid {
         let levels = (0..4)
-            .map(|i| Level { ifd: i, width: 1024 >> i, height: 512 >> i, tile: (256, 256) })
+            .map(|i| Level { ifd: i, width: 1024 >> i, height: 512 >> i, tile: (256, 256), cached: None })
             .collect();
-        Pyramid { path: PathBuf::from("test.tif"), levels }
+        Pyramid { path: PathBuf::from("test.tif"), levels, cache: None }
     }
 
     #[test]
@@ -470,7 +467,7 @@ mod tests {
         let (across, down) = pyramid.levels[0].grid();
 
         let (tx, rx) = std::sync::mpsc::channel();
-        let loader = TileLoader::new(path.clone(), pyramid.clone(), 3, move |key, tile| {
+        let loader = TileLoader::new(pyramid.clone(), 3, move |key, tile| {
             let _ = tx.send((key, tile));
         });
         let all: Vec<TileKey> =
