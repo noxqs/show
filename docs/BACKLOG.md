@@ -988,9 +988,22 @@ Ordered by payoff, with the measurement that justifies each.
    modification time; 8 GB budget, least recently used dropped first.
 
    Measured on a synthetic 24000x16000 deflate file, 4 cores: the first open
-   goes from 1.3 s to 1.8 s, and memory from 395 MB to 590 MB. Not yet measured
-   on the real files: `show --tiles <file>` reports the first-open time and the
-   stored levels.
+   goes from 1.3 s to 1.8 s, and memory from 395 MB to 590 MB.
+
+   Measured on K11 with `show --tiles`, release build:
+
+   | file | first open, storing | stored levels | fit view | 1/4 view |
+   |---|---|---|---|---|
+   | 1955 mosaic, 52416x34080 | 2.8 s | 7, down to 410x267 | 35 tiles, 2.5 ms | 91 tiles, 7.0 ms |
+   | 1982 plan, 23585x18939 | 1.1 s | 6, down to 369x296 | 30 tiles, 4.1 ms | 91 tiles, 11.6 ms |
+
+   Both together take 105 MB of disk. Later opens probe in 0.1-0.2 ms and read
+   a stored tile in 0.3-1.4 ms. A full-size mosaic tile read in 1.8 ms on K11,
+   not the 10.5 ms first measured, which is why reading all 6,901 of them is
+   seconds rather than the 72 s estimated above. The 1982 plan's own tiles are
+   1024 px against the stored 512, so its level 1 has the same grid as level 0;
+   the planner and the stand-in lookup only assume levels halve, not that tile
+   sizes match.
 2. ~~**Multi-file navigation**~~ — built, along with the detailed view
    (`browser.rs`), the mosaic grid, similarity grouping (`similarity.rs`) and a
    persistent thumbnail cache that also reads the desktop's own
