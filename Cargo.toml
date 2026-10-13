@@ -1,0 +1,114 @@
+[package]
+name = "show"
+version = "1.1.0"
+edition = "2024"
+description = "The fastest image viewer"
+
+[dependencies]
+# --- windowing / gpu ---
+winit = "0.30"
+wgpu = "26"
+pollster = "0.4"
+bytemuck = { version = "1", features = ["derive"] }
+raw-window-handle = "0.6"
+# CPU presentation for the first frame, while the GPU is still starting up.
+softbuffer = "0.4"
+
+# --- io ---
+memmap2 = "0.9"
+rayon = "1"
+
+# --- decoders ---
+image = { version = "0.25", default-features = false, features = [
+    "bmp", "dds", "exr", "ff", "gif", "hdr", "ico", "jpeg", "png",
+    "pnm", "qoi", "tga", "tiff", "webp", "rayon",
+] }
+# The fastest full-resolution JPEG decoder available in Rust. Pinned to the
+# same major as the copy `image` uses, so it is compiled once, not twice.
+zune-jpeg = "0.5"
+# zune-jpeg has no scaled-decode API (verified: no scale/idct_size entry point),
+# and decoding at 1/2 or 1/4 is the single biggest win a viewer has on large
+# JPEGs. This decoder does, so it handles that case and zune handles full res.
+jpeg-decoder = { version = "0.3", features = ["rayon"] }
+png = "0.17"
+# Direct, for tiled and pyramidal TIFFs: `image` decodes a whole TIFF at once,
+# which is not an option for a gigapixel map. The `webp` feature is what lets
+# WebP-compressed tiles be read, and it pulls pure-Rust image-webp rather than
+# a system library.
+tiff = { version = "0.11", features = ["webp"] }
+# Direct, to work around a bug in tiff's WebP tile path: it sizes the output
+# buffer from the TIFF's sample count, while image-webp requires exactly its
+# own `output_buffer_size()`. Tiles without alpha in an RGBA file therefore
+# fail. Same crate tiff already pulls in, so this costs no extra build.
+image-webp = "0.2"
+# libjpeg-turbo, built from the source this crate bundles and linked
+# statically: its SIMD Huffman decoding is about twice as fast as either Rust
+# decoder above, and a static build makes that true on every machine rather
+# than only where the distribution happens to ship it. `pkg-config` is left
+# out on purpose — it would link the system's shared copy instead. Building
+# needs cmake and nasm.
+turbojpeg-sys = { version = "1.2", default-features = false, features = ["cmake", "require-simd"] }
+# JPEG XL, pure Rust; there is no system library worth linking for it.
+jxl-oxide = "0.12"
+
+# Runtime library loading, so optional codecs never become link-time
+# dependencies. wgpu already uses this to find Vulkan.
+libloading = "0.8"
+
+# Video, linked against the static FFmpeg 9 in vendor/ (tools/build-ffmpeg.sh).
+# `rsmpeg` was the alternative and is ruled out: it sits on `rusty_ffmpeg`,
+# which stops at FFmpeg 8.1.
+ffmpeg-next = { version = "9.0", default-features = false, features = [
+    "codec", "format", "software-resampling", "software-scaling", "static",
+] }
+
+# Subtitle typesetting. Pure Rust, so the embedded face costs no system
+# library — the point of not using libass.
+ab_glyph = "0.2"
+
+# The tray icon (src/tray.rs): a StatusNotifierItem and the bus calls behind
+# its menu. Pure Rust over the session bus — no toolkit, nothing linked — on
+# async-io rather than tokio, which nothing else here wants.
+ksni = { version = "0.3.6", default-features = false, features = ["async-io", "blocking"] }
+zbus = { version = "5", default-features = false, features = ["async-io", "blocking-api"] }
+# The screenshot tool (src/screenshot.rs). x11rb is the copy winit already
+# brings, loading libxcb at run time the same way; arboard owns and serves the
+# X11 clipboard, including the incremental transfer a large image needs.
+x11rb = { version = "0.13", features = ["allow-unsafe-code", "dl-libxcb"] }
+arboard = { version = "3.6", default-features = false, features = ["image-data"] }
+
+anyhow = "1"
+ureq = { version = "3.4.1", default-features = false, features = ["rustls"] }
+flate2 = "1.1.10"
+# `cuda` compiles the code that registers the card's execution provider. It
+# adds no link-time dependency and no download: without the card support
+# installed, the registration is simply never attempted.
+ort = { version = "2.0.0-rc.13", default-features = false, features = ["load-dynamic", "ndarray", "cuda"], optional = true }
+
+[features]
+# Inference is on by default. It was not while the `dlopen` path was unproven;
+# it is now, and the property that made the flag safe to enable was checked
+# rather than assumed: with `ml` compiled in and no runtime installed, the
+# binary starts, plays, and says what is missing and how to get it.
+default = ["ml"]
+# ONNX inference. Unlike `avif-system-dav1d` this does NOT give the binary a
+# link-time dependency: `ort/load-dynamic` dlopens libonnxruntime at first use,
+# exactly as src/heif.rs does for libheif and src/alsa.rs for ALSA. The flag
+# exists because the crate tree is not free, not because the binary stops
+# running anywhere. See docs/dependencies.md.
+ml = ["dep:ort"]
+# AVIF through `image`, which binds libdav1d. This is the ONLY thing that turns
+# `show` into a binary with a non-libc runtime dependency: enable it and the
+# executable will refuse to start anywhere libdav1d.so.7 is absent. Kept behind
+# a flag so the default build stays self-contained; see `docs/dependencies.md`.
+avif-system-dav1d = ["image/avif-native"]
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
+
+[profile.dev.package."*"]
+opt-level = 3

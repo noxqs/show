@@ -1,0 +1,7 @@
+# Points the FFmpeg bindings at the static build in vendor/, rather than
+# whatever the distribution happens to ship. Built by tools/build-ffmpeg.sh.
+[env]
+FFMPEG_PKG_CONFIG_PATH = { value = "vendor/ffmpeg9/lib/pkgconfig", relative = true }
+PKG_CONFIG_PATH = { value = "vendor/ffmpeg9/lib/pkgconfig", relative = true }
+# libjpeg-turbo is linked statically, never the system's shared library.
+TURBOJPEG_STATIC = "1"
