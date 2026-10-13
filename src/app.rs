@@ -173,6 +173,15 @@ fn caption_y(picture_bottom: f32, win_h: f32, caption_h: f32) -> i32 {
     }
 }
 
+/// [`caption_y`] for a caption drawn at `scale` times its usual size: placed
+/// as the usual one would be, then grown about its middle, so changing the
+/// size leaves the words where the eye already is.
+fn caption_y_scaled(picture_bottom: f32, win_h: f32, caption_h: f32, scale: f32) -> i32 {
+    let usual = caption_h / scale.max(0.01);
+    let middle = caption_y(picture_bottom, win_h, usual) as f32 + usual / 2.0;
+    (middle - caption_h / 2.0).clamp(0.0, (win_h - caption_h).max(0.0)) as i32
+}
+
 /// The first line of a message, for somewhere with room for one.
 fn first_line(text: &str) -> &str {
     text.lines().next().unwrap_or(text)
@@ -4921,7 +4930,18 @@ impl App {
     /// a deep zoom would otherwise fill the screen with two words, and a tiny
     /// window would produce text nobody could read.
     fn caption_size(&self) -> f32 {
-        caption_px(self.picture_height().unwrap_or_else(|| self.win_size().1))
+        caption_px(self.picture_height().unwrap_or_else(|| self.win_size().1)) * self.config.caption_scale
+    }
+
+    /// Ctrl < and >: subtitles a tenth smaller or larger, kept for next time.
+    fn scale_captions(&mut self, steps: i32) {
+        let scale = (self.config.caption_scale * 1.1f32.powi(steps)).clamp(0.5, 3.0);
+        self.config.caption_scale = (scale * 20.0).round() / 20.0;
+        if let Err(e) = self.config.save() {
+            eprintln!("show: could not save the subtitle size: {e:#}");
+        }
+        self.notify(&format!("SUBTITLES {}%", (self.config.caption_scale * 100.0).round() as i32));
+        self.redraw();
     }
 
     /// The picture's height on screen, in window pixels.
@@ -5609,7 +5629,7 @@ impl App {
                 if matches!(corner, Corner::Caption)
                     && let Some(bottom) = picture_bottom
                 {
-                    y = caption_y(bottom, full.1, ov.height as f32);
+                    y = caption_y_scaled(bottom, full.1, ov.height as f32, self.config.caption_scale);
                 }
                 if matches!(corner, Corner::TopLeft | Corner::TopRight) {
                     let cursor = next_y.entry(*corner).or_insert(y);
@@ -7228,6 +7248,14 @@ impl ApplicationHandler<UserEvent> for App {
                     // Frame at a time, for looking rather than watching.
                     // The comma and full stop keys, as every other player
                     // uses them.
+                    // With ctrl, the subtitle size instead: < and > are the
+                    // same keys shifted.
+                    Key::Character(",") | Key::Character("<") if self.ctrl_held && self.video.is_some() => {
+                        self.scale_captions(-1)
+                    }
+                    Key::Character(".") | Key::Character(">") if self.ctrl_held && self.video.is_some() => {
+                        self.scale_captions(1)
+                    }
                     Key::Character(",") if self.video.is_some() => self.step_frame(false),
                     Key::Character(".") if self.video.is_some() => self.step_frame(true),
 
@@ -7356,7 +7384,19 @@ impl ApplicationHandler<UserEvent> for App {
 
 #[cfg(test)]
 mod caption_tests {
-    use super::{Corner, caption_px, caption_y};
+    use super::{Corner, caption_px, caption_y, caption_y_scaled};
+
+    #[test]
+    fn a_bigger_caption_grows_about_its_middle() {
+        // In the band below the picture, and inside it when there is no band.
+        for bottom in [1260.0, 1440.0] {
+            let usual = caption_y(bottom, 1440.0, 60.0) as f32 + 30.0;
+            let grown = caption_y_scaled(bottom, 1440.0, 90.0, 1.5) as f32 + 45.0;
+            assert!((usual - grown).abs() <= 1.0, "middle moved from {usual} to {grown}");
+        }
+        // Never pushed off the bottom of the window.
+        assert!(caption_y_scaled(1440.0, 1440.0, 400.0, 3.0) + 400 <= 1440);
+    }
 
     #[test]
     fn captions_scale_with_the_picture_not_the_window() {

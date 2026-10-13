@@ -26,6 +26,8 @@ Released: **v1.1.0** (2026-10-13).
 - [x] Keep the screensaver off while a video plays (`src/awake.rs`).
 - [ ] Check on K11 that the screen stays on through a video, and blanks again
       when paused.
+- [x] Subtitle size on ctrl < / >, kept between sessions, growing about the
+      caption's middle.
 - [x] Docs: audio clock already re-anchors on seek; update the stale note in
       `BACKLOG.md` (Next #1).
 

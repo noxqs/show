@@ -99,11 +99,15 @@ pub struct Config {
     /// Playback gain, 0 to 1.5. Kept because a volume that reset to full on
     /// every file would be a nasty surprise at least once per evening.
     pub volume: f32,
+    /// Subtitle size against the one chosen for the picture, 0.5 to 3. Set
+    /// with ctrl < and >, and kept, since eyes and sofas do not change between
+    /// films.
+    pub caption_scale: f32,
 }
 
 impl Default for Config {
     fn default() -> Self {
-        Config { confirm_delete: true, delete_to_trash: true, show_stats: true, show_zoom: true, show_vram: true, hold_zoom: false, max_memory_mb: 0, show_debug: true, autoscale: false, cover: false, sort: crate::playlist::Sort::Folder, hardware_decode: true, frame_cache_mb: 0, look_hz: 1, sharpen: false, min_confidence: 0.25, duplicate_overlap: 0.45, volume: 1.0 }
+        Config { confirm_delete: true, delete_to_trash: true, show_stats: true, show_zoom: true, show_vram: true, hold_zoom: false, max_memory_mb: 0, show_debug: true, autoscale: false, cover: false, sort: crate::playlist::Sort::Folder, hardware_decode: true, frame_cache_mb: 0, look_hz: 1, sharpen: false, min_confidence: 0.25, duplicate_overlap: 0.45, volume: 1.0, caption_scale: 1.0 }
     }
 }
 
@@ -209,6 +213,9 @@ impl Config {
                 "volume" => {
                     config.volume = value.trim().parse::<f32>().unwrap_or(1.0).clamp(0.0, 1.5)
                 }
+                "caption_scale" => {
+                    config.caption_scale = value.trim().parse::<f32>().unwrap_or(1.0).clamp(0.5, 3.0)
+                }
                 _ => {}
             }
         }
@@ -257,7 +264,9 @@ impl Config {
              # how much two of a kind may overlap before the weaker one is\n\
              # taken for a repeat rather than a second thing\n\
              duplicate_overlap = {:.2}\n\
-             volume = {:.2}\n",
+             volume = {:.2}\n\
+             # subtitle size, 1.00 being the size chosen for the picture\n\
+             caption_scale = {:.2}\n",
             self.confirm_delete,
             self.delete_to_trash,
             self.show_stats,
@@ -275,7 +284,8 @@ impl Config {
             self.sharpen,
             self.min_confidence,
             self.duplicate_overlap,
-            self.volume
+            self.volume,
+            self.caption_scale
         )
     }
 }
@@ -388,6 +398,7 @@ mod tests {
             duplicate_overlap: 0.7,
             sharpen: true,
             volume: 0.35,
+            caption_scale: 1.5,
         };
         let read = Config::parse(&written.to_text());
         assert_eq!(read, written, "a setting was lost between saving and loading");

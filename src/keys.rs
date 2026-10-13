@@ -67,6 +67,7 @@ pub const SECTIONS: &[(&str, &[(&str, &str)])] = &[
         ("R", "REPEAT THIS FILM"),
         ("WHEEL", "VOLUME"),
         ("V", "NEXT SUBTITLE TRACK"),
+        ("CTRL < / >", "SUBTITLES SMALLER / BIGGER"),
     ]),
     ("THE MOUSE", &[
         ("WHEEL", "ZOOM AT POINTER"),
