@@ -20,7 +20,7 @@ Released: **v1.1.0** (2026-10-13).
       out or in no longer reads every full-size tile (Measured #1).
 - [x] Measure the stored pyramid on the real files on K11: first open, later
       opens, disk size (`show --tiles <file>`).
-- [ ] Subtitle cue retention: a backward seek of more than 30 s loses captions;
+- [x] Subtitle cue retention: a backward seek of more than 30 s loses captions;
       replace the fixed `KEEP` window in `src/subtitles.rs` (Next #4).
 - [ ] Neighbour prefetch for the single-image view (Measured #2).
 - [x] Keep the screensaver off while a video plays (`src/awake.rs`).

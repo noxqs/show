@@ -106,9 +106,13 @@ adapter benchmark to the integrated Radeon by 2.2x.
    line. Captions sit in the letterbox band below the picture when there is
    one deep enough, where they cover nothing.
 
-   Still open: no styling, so a sign and a line of dialogue look alike; and
-   cues are retired 30 s behind the play position, which becomes a cache bound
-   to revisit now that seeking exists.
+   Still open: no styling, so a sign and a line of dialogue look alike.
+
+   Only picture captions from a stream in the video are forgotten, 30 s behind
+   a seek: they are the large ones, and seeking back decodes them again. Text,
+   and anything from a file beside the video, is kept for the whole film,
+   since a file is read once and dropping its cues lost them for good on the
+   first seek back. Subtitle size is ctrl < / >, kept in the config.
 
 ## Why playback is three threads
 
