@@ -72,7 +72,8 @@ pub const SECTIONS: &[(&str, &[(&str, &str)])] = &[
     ("THE MOUSE", &[
         ("WHEEL", "ZOOM AT POINTER"),
         ("CTRL SHIFT WHEEL", "GROW / SHRINK WINDOW"),
-        ("DRAG", "PAN"),
+        ("DRAG", "MOVE THE WINDOW (FULLSCREEN: PAN)"),
+        ("SHIFT DRAG", "PAN THE PICTURE OR FILM"),
         ("DOUBLE CLICK", "FIT TO WINDOW"),
         ("RIGHT CLICK", "AUTOSCALE"),
         ("CLICK ON VIDEO", "PAUSE / RESUME"),

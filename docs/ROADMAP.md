@@ -5,8 +5,9 @@ The working list. One line per item; the reasoning and measurements live in
 
 **How it is used.** The commit that finishes an item ticks it here in the same
 commit. When every item in a release section is ticked, bump `version` in
-`Cargo.toml`, move the section's items into the release notes, and push a tag
-`vX.Y.Z`; CI builds and publishes the release from the tag.
+`Cargo.toml` and merge to main: CI sees a version with no tag yet, tags it
+`vX.Y.Z` and publishes the release. A version with a dash (`1.3.0-rc1`) is
+published as a pre-release.
 
 Linux only: no other platform is planned.
 
@@ -32,6 +33,9 @@ Released: **v1.2.0** (2026-10-15), **v1.1.0** (2026-10-13).
       caption's middle.
 - [x] Docs: audio clock already re-anchors on seek; update the stale note in
       `BACKLOG.md` (Next #1).
+- [x] Windowed, a plain drag anywhere moves the window; shift + drag pans the
+      picture or film. Fullscreen, a plain drag still pans.
+- [x] Releases publish themselves when a new version reaches main.
 
 ## v1.3.0 (next)
 
