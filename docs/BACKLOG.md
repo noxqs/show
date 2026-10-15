@@ -1025,8 +1025,15 @@ Ordered by payoff, with the measurement that justifies each.
    are not.
 6. **Evaluate `zune-png` and `libwebp`.** PNG runs at 163 MPix/s and WebP at
    94, against JPEG's 631.
-7. **Staging buffer pool + transfer queue.** Upload is *not* free — 183 MB cost
-   41 ms — so it should not block a frame.
+7. ~~**Staging buffer pool + transfer queue.**~~ **Built, as a thread.** Upload
+   is *not* free — 183 MB cost 41 ms — so it should not block a frame. The
+   full-resolution picture, arriving behind a reduced one already on screen,
+   is now uploaded on an `upload` thread (`Gpu::upload_in_background`): the
+   downscale to the card's limit, the copy, the mips and the wait all happen
+   there, and the texture is swapped in when it lands, or dropped if the
+   picture has changed meanwhile. wgpu exposes no separate transfer queue, so
+   that half is moot. A staging-buffer pool would only shorten the copy, which
+   no longer costs a frame; leave it until the copy itself measures slow.
 8. ~~**Mipmaps.**~~ **Built.** The picture gets a full mip chain, rendered
    level by level on the card straight after the upload (`MipGen` in
    `src/gpu.rs`, `src/mip.wgsl`), averaged in linear light because the texture

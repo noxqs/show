@@ -43,8 +43,9 @@ Released: **v1.2.0** (2026-10-15), **v1.1.0** (2026-10-13).
       decode stops costing more CPU than software (Next #3).
 - [x] Mipmaps, so a large image fitted to the window does not alias
       (Measured #8).
-- [ ] Staging buffer pool + transfer queue, so uploads do not block a frame
-      (Measured #7).
+- [x] Uploads do not block a frame: the full-resolution picture is uploaded
+      on a thread of its own (Measured #7). wgpu has no transfer queue to
+      ask for; a staging pool waits until the copy itself measures slow.
 
 ## Later
 

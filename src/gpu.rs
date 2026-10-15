@@ -122,7 +122,7 @@ pub struct Core {
     pub max_texture: u32,
     pub adapter_name: String,
     /// Built the first time an image wants mipmaps, not at startup.
-    mips: std::sync::OnceLock<MipGen>,
+    mips: std::sync::Arc<std::sync::OnceLock<MipGen>>,
 }
 
 impl Core {
@@ -202,6 +202,33 @@ impl Core {
     }
 
     fn upload_inner(&self, rgba: &[u8], width: u32, height: u32, flush: bool, mipmapped: bool) -> Uploaded {
+        self.uploader().upload(rgba, width, height, flush, mipmapped)
+    }
+
+    /// What an upload needs, detached from the window so it can run on a
+    /// thread of its own.
+    fn uploader(&self) -> Uploader {
+        Uploader {
+            device: self.device.clone(),
+            queue: self.queue.clone(),
+            max_texture: self.max_texture,
+            mips: self.mips.clone(),
+        }
+    }
+}
+
+/// Everything an upload touches. The device and queue are shared handles,
+/// so this can be sent to another thread while the window keeps drawing.
+#[derive(Clone)]
+struct Uploader {
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    max_texture: u32,
+    mips: std::sync::Arc<std::sync::OnceLock<MipGen>>,
+}
+
+impl Uploader {
+    fn upload(&self, rgba: &[u8], width: u32, height: u32, flush: bool, mipmapped: bool) -> Uploaded {
         let factor = crate::scale::factor_for_limit(width, height, self.max_texture);
 
         let (owned, w, h) = if factor > 1 {
@@ -1022,9 +1049,35 @@ impl Gpu {
     }
 
     pub fn upload(&mut self, rgba: &[u8], width: u32, height: u32) {
+        let uploaded = self.core.upload_mipmapped(rgba, width, height);
+        self.adopt(uploaded);
+    }
+
+    /// As [`Gpu::upload`], on a thread of its own: the copy, the mips and the
+    /// wait for both happen there, and the window keeps drawing whatever it
+    /// has meanwhile. A 183 MB upload costs about 41 ms, which on this thread
+    /// would be several dropped frames. `done` gets the texture, which is
+    /// shown once it comes back to [`Gpu::adopt`].
+    pub fn upload_in_background(
+        &self,
+        rgba: Vec<u8>,
+        width: u32,
+        height: u32,
+        done: impl FnOnce(Uploaded) + Send + 'static,
+    ) {
+        let uploader = self.core.uploader();
+        let spawned = std::thread::Builder::new().name("upload".into()).spawn(move || {
+            done(uploader.upload(&rgba, width, height, true, true));
+        });
+        if let Err(e) = spawned {
+            eprintln!("show: could not start an upload thread: {e}");
+        }
+    }
+
+    /// Show a texture made by [`Gpu::upload_in_background`].
+    pub fn adopt(&mut self, uploaded: Uploaded) {
         // An image replaces any video planes that were being drawn.
         self.yuv = None;
-        let uploaded = self.core.upload_mipmapped(rgba, width, height);
         let bound = self.renderer.bind(&self.core.device, &uploaded.view);
         self.image = Some((uploaded, bound));
     }

@@ -390,6 +390,8 @@ enum UserEvent {
     Raise(bool),
     /// The open windows, or what one of them shows, changed.
     Peers,
+    /// The full-resolution picture, on the card and ready to draw.
+    Uploaded(Generation, Box<crate::gpu::Uploaded>),
     /// One tile of a tiled image, read.
     Tile(Generation, crate::tiles::TileKey, Box<Result<crate::tiled::Tile>>),
     /// Where on the map an image belongs, if anywhere: its path, and every
@@ -1469,7 +1471,11 @@ impl App {
             self.mosaic_composite = None;
         }
 
-        self.upload_to_gpu();
+        if is_full {
+            self.upload_to_gpu_in_background();
+        } else {
+            self.upload_to_gpu();
+        }
         self.build_status_badge();
         self.build_filename_badge();
         if self.browser.is_some() {
@@ -1517,6 +1523,21 @@ impl App {
         // The GPU may have shrunk the texture further to fit its own limits, so
         // ask what actually landed rather than assuming.
         shown.adequate_zoom /= gpu.downscaled_by() as f32;
+    }
+
+    /// As [`App::upload_to_gpu`], without holding up the window: for the
+    /// full-resolution picture arriving behind a reduced one, which is
+    /// already on screen and can stay there until the upload lands. Someone
+    /// panning or zooming meanwhile should not feel the copy.
+    fn upload_to_gpu_in_background(&mut self) {
+        let (Some(gpu), Some(shown)) = (self.gpu.as_ref(), self.shown.as_mut()) else { return };
+        let Some(pixels) = shown.pixels.take() else { return };
+
+        let proxy = self.proxy.clone();
+        let generation = self.generation;
+        gpu.upload_in_background(pixels, shown.tex.0, shown.tex.1, move |uploaded| {
+            let _ = proxy.send_event(UserEvent::Uploaded(generation, Box::new(uploaded)));
+        });
     }
 
     /// Swap the software surface for a real one. Softbuffer is dropped first:
@@ -6109,6 +6130,19 @@ impl ApplicationHandler<UserEvent> for App {
             }
             UserEvent::Peers => {
                 self.build_peer_strip();
+                self.redraw();
+                return;
+            }
+            UserEvent::Uploaded(generation, uploaded) => {
+                // A newer picture has replaced the one this was for.
+                if generation != self.generation {
+                    return;
+                }
+                if let (Some(gpu), Some(shown)) = (self.gpu.as_mut(), self.shown.as_mut()) {
+                    let factor = uploaded.downscaled_by;
+                    gpu.adopt(*uploaded);
+                    shown.adequate_zoom /= factor as f32;
+                }
                 self.redraw();
                 return;
             }
