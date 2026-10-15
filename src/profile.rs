@@ -142,7 +142,7 @@ fn profile_one(path: &Path, opts: &Options) -> Result<Measured> {
     let target = offscreen_target(&core.device, opts.screen);
 
     let t = Instant::now();
-    let uploaded = core.upload(&d.rgba, d.width, d.height);
+    let uploaded = core.upload_mipmapped(&d.rgba, d.width, d.height);
     let bound = renderer.bind(&core.device, &uploaded.view);
     let upload_t = t.elapsed();
 
@@ -233,7 +233,7 @@ fn repeat(
         let d = &loaded.decoded;
 
         let t = Instant::now();
-        let uploaded = core.upload(&d.rgba, d.width, d.height);
+        let uploaded = core.upload_mipmapped(&d.rgba, d.width, d.height);
         let bound = renderer.bind(&core.device, &uploaded.view);
         upload_t.push(t.elapsed());
 

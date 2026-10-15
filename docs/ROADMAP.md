@@ -41,7 +41,7 @@ Released: **v1.2.0** (2026-10-15), **v1.1.0** (2026-10-13).
 
 - [ ] Zero-copy hardware frames: VA surface → DMA-BUF → Vulkan, so hardware
       decode stops costing more CPU than software (Next #3).
-- [ ] Mipmaps, so a large image fitted to the window does not alias
+- [x] Mipmaps, so a large image fitted to the window does not alias
       (Measured #8).
 - [ ] Staging buffer pool + transfer queue, so uploads do not block a frame
       (Measured #7).

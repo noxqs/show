@@ -1027,8 +1027,12 @@ Ordered by payoff, with the measurement that justifies each.
    94, against JPEG's 631.
 7. **Staging buffer pool + transfer queue.** Upload is *not* free — 183 MB cost
    41 ms — so it should not block a frame.
-8. **Mipmaps.** Linear minification without mips aliases when a large image is
-   fitted to a window.
+8. ~~**Mipmaps.**~~ **Built.** The picture gets a full mip chain, rendered
+   level by level on the card straight after the upload (`MipGen` in
+   `src/gpu.rs`, `src/mip.wgsl`), averaged in linear light because the texture
+   is sRGB. Samplers blend between levels. Measured on the iGPU: 0.9 ms for
+   4000x3000 (12 levels), 2.1 ms the first time, which includes building the
+   pipeline. Tiles, overlays and video frames get none: tiles have the pyramid.
 9. **Chase the ~10 ms window-map gap.** On a 2 MP JPEG the decode finishes at
     9.7 ms but rasterising starts at 19.6 ms. Suspected compositor latency;
     it is now a larger slice of cold start than the decode.

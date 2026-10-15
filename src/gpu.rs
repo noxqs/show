@@ -121,6 +121,8 @@ pub struct Core {
     pub queue: wgpu::Queue,
     pub max_texture: u32,
     pub adapter_name: String,
+    /// Built the first time an image wants mipmaps, not at startup.
+    mips: std::sync::OnceLock<MipGen>,
 }
 
 impl Core {
@@ -160,7 +162,7 @@ impl Core {
             .context("requesting device")?
         };
 
-        Ok(Core { instance, adapter, device, queue, max_texture, adapter_name })
+        Ok(Core { instance, adapter, device, queue, max_texture, adapter_name, mips: Default::default() })
     }
 
     /// Try `backends`, and if nothing usable turns up, try everything.
@@ -181,17 +183,25 @@ impl Core {
     /// Move RGBA8 pixels into a texture, downscaling first if the image
     /// exceeds the hardware's maximum texture dimension.
     pub fn upload(&self, rgba: &[u8], width: u32, height: u32) -> Uploaded {
-        self.upload_inner(rgba, width, height, true)
+        self.upload_inner(rgba, width, height, true, false)
+    }
+
+    /// As [`Core::upload`], with a full mip chain built on the card. For the
+    /// picture itself, which is routinely shown at a fraction of its size:
+    /// linear filtering alone reads only four texels per screen pixel, so a
+    /// large image fitted to the window would alias and shimmer.
+    pub fn upload_mipmapped(&self, rgba: &[u8], width: u32, height: u32) -> Uploaded {
+        self.upload_inner(rgba, width, height, true, true)
     }
 
     /// As [`Core::upload`], without waiting for the copy to land: it is
     /// ordered before the next frame's submit anyway. For tiles, which arrive
     /// by the dozen, where waiting for each one in turn would stall the loop.
     pub fn upload_unflushed(&self, rgba: &[u8], width: u32, height: u32) -> Uploaded {
-        self.upload_inner(rgba, width, height, false)
+        self.upload_inner(rgba, width, height, false, false)
     }
 
-    fn upload_inner(&self, rgba: &[u8], width: u32, height: u32, flush: bool) -> Uploaded {
+    fn upload_inner(&self, rgba: &[u8], width: u32, height: u32, flush: bool, mipmapped: bool) -> Uploaded {
         let factor = crate::scale::factor_for_limit(width, height, self.max_texture);
 
         let (owned, w, h) = if factor > 1 {
@@ -203,6 +213,7 @@ impl Core {
             (None, width, height)
         };
         let pixels: &[u8] = owned.as_deref().unwrap_or(rgba);
+        let levels = if mipmapped { mip_levels(w, h) } else { 1 };
 
         let texture = {
             let mut s = timing::span("gpu", "texture_alloc");
@@ -210,11 +221,17 @@ impl Core {
             self.device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("image"),
                 size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
-                mip_level_count: 1,
+                mip_level_count: levels,
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
                 format: wgpu::TextureFormat::Rgba8UnormSrgb,
-                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                usage: if levels > 1 {
+                    wgpu::TextureUsages::TEXTURE_BINDING
+                        | wgpu::TextureUsages::COPY_DST
+                        | wgpu::TextureUsages::RENDER_ATTACHMENT
+                } else {
+                    wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST
+                },
                 view_formats: &[],
             })
         };
@@ -237,6 +254,13 @@ impl Core {
                 },
                 wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
             );
+        }
+
+        if levels > 1 {
+            let mut s = timing::span("gpu", "mips");
+            s.note(format!("{levels} levels"));
+            let generate = self.mips.get_or_init(|| MipGen::new(&self.device));
+            generate.run(&self.device, &self.queue, &texture, levels);
         }
 
         if flush {
@@ -264,6 +288,132 @@ pub struct Uploaded {
     /// Dimensions actually living on the GPU.
     pub uploaded: (u32, u32),
     pub downscaled_by: u32,
+}
+
+/// Levels in a full mip chain for `w` x `h`, down to 1x1.
+fn mip_levels(w: u32, h: u32) -> u32 {
+    32 - w.max(h).max(1).leading_zeros()
+}
+
+/// Builds each mip level from the one above with a render pass.
+struct MipGen {
+    pipeline: wgpu::RenderPipeline,
+    layout: wgpu::BindGroupLayout,
+    sampler: wgpu::Sampler,
+}
+
+impl MipGen {
+    fn new(device: &wgpu::Device) -> MipGen {
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("mip"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("mip.wgsl").into()),
+        });
+        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("mip"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("mip"),
+            bind_group_layouts: &[&layout],
+            push_constant_ranges: &[],
+        });
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("mip"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs"),
+                buffers: &[],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("mip"),
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+        MipGen { pipeline, layout, sampler }
+    }
+
+    /// Fill levels 1.. of `texture` from level 0, which must already be
+    /// written. Ordered after that write on the queue, so nothing waits here.
+    fn run(&self, device: &wgpu::Device, queue: &wgpu::Queue, texture: &wgpu::Texture, levels: u32) {
+        let view = |level| {
+            texture.create_view(&wgpu::TextureViewDescriptor {
+                base_mip_level: level,
+                mip_level_count: Some(1),
+                ..Default::default()
+            })
+        };
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("mip") });
+        for level in 1..levels {
+            let src = view(level - 1);
+            let dst = view(level);
+            let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("mip"),
+                layout: &self.layout,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&src) },
+                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.sampler) },
+                ],
+            });
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("mip"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &dst,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            pass.set_pipeline(&self.pipeline);
+            pass.set_bind_group(0, &bind, &[]);
+            pass.draw(0..3, 0..1);
+        }
+        queue.submit(Some(encoder.finish()));
+    }
 }
 
 /// Uniforms for the planar-YUV pipeline: where to draw, and how to convert.
@@ -449,7 +599,9 @@ impl Renderer {
                 address_mode_w: wgpu::AddressMode::ClampToEdge,
                 mag_filter: mag,
                 min_filter: wgpu::FilterMode::Linear,
-                mipmap_filter: wgpu::FilterMode::Nearest,
+                // Between mip levels too, so a zoom that crosses one does not
+                // visibly step. Textures without mips are unaffected.
+                mipmap_filter: wgpu::FilterMode::Linear,
                 ..Default::default()
             })
         };
@@ -872,7 +1024,7 @@ impl Gpu {
     pub fn upload(&mut self, rgba: &[u8], width: u32, height: u32) {
         // An image replaces any video planes that were being drawn.
         self.yuv = None;
-        let uploaded = self.core.upload(rgba, width, height);
+        let uploaded = self.core.upload_mipmapped(rgba, width, height);
         let bound = self.renderer.bind(&self.core.device, &uploaded.view);
         self.image = Some((uploaded, bound));
     }
@@ -1456,5 +1608,21 @@ mod pipeline_tests {
             return;
         };
         let _ = super::Renderer::new(&core.device, wgpu::TextureFormat::Bgra8UnormSrgb);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_mip_chain_ends_at_one_pixel() {
+        assert_eq!(mip_levels(1, 1), 1);
+        assert_eq!(mip_levels(2, 1), 2);
+        assert_eq!(mip_levels(1024, 768), 11);
+        assert_eq!(mip_levels(1025, 10), 11);
+        assert_eq!(mip_levels(6000, 4000), 13);
+        // The largest texture a card offers still fits.
+        assert_eq!(mip_levels(16384, 16384), 15);
     }
 }
