@@ -173,6 +173,15 @@ fn caption_y(picture_bottom: f32, win_h: f32, caption_h: f32) -> i32 {
     }
 }
 
+/// [`caption_y`] for a caption drawn at `scale` times its usual size: placed
+/// as the usual one would be, then grown about its middle, so changing the
+/// size leaves the words where the eye already is.
+fn caption_y_scaled(picture_bottom: f32, win_h: f32, caption_h: f32, scale: f32) -> i32 {
+    let usual = caption_h / scale.max(0.01);
+    let middle = caption_y(picture_bottom, win_h, usual) as f32 + usual / 2.0;
+    (middle - caption_h / 2.0).clamp(0.0, (win_h - caption_h).max(0.0)) as i32
+}
+
 /// The first line of a message, for somewhere with room for one.
 fn first_line(text: &str) -> &str {
     text.lines().next().unwrap_or(text)
@@ -358,6 +367,8 @@ enum UserEvent {
     Preview(Generation, Box<Result<Loaded>>),
     /// Full resolution, loaded behind the preview.
     Full(Generation, Box<Result<Loaded>>),
+    /// The image after this one, read ahead while nothing else is happening.
+    Neighbour(PathBuf, Box<Result<Loaded>>),
     /// Instance, adapter and device, built off the main thread.
     GpuReady(Box<Result<Core>>),
     /// One grid cell, decoded at cell resolution.
@@ -706,6 +717,11 @@ struct App {
     pending: Option<(Loaded, bool)>,
     shown: Option<Displayed>,
     full_res: FullRes,
+    /// The image the next step will land on, read ahead: its path, and the
+    /// result once it is in. See [`App::prefetch_neighbour`].
+    neighbour: Option<(PathBuf, Option<Loaded>)>,
+    /// Which way the last step went, so the read-ahead follows it.
+    step_dir: isize,
     view: View,
     cursor: (f32, f32),
     dragging: bool,
@@ -967,6 +983,8 @@ struct App {
     /// This window on the session bus, for the tray icon's menu. Joined after
     /// the first frame, so the bus is never in the way of the first picture.
     presence: Option<crate::tray::Presence>,
+    /// Keeps the screensaver off while a video plays.
+    awake: crate::awake::Awake,
     /// The open windows, as the list the filename drops down: each row's
     /// span within it and the window it raises, and whether it is down.
     peer_list: Option<(Overlay, Vec<(i32, i32, String)>)>,
@@ -1034,6 +1052,8 @@ impl App {
             pending: None,
             shown: None,
             full_res: FullRes::NotNeeded,
+            neighbour: None,
+            step_dir: 1,
             view,
             cursor: (0.0, 0.0),
             dragging: false,
@@ -1110,6 +1130,7 @@ impl App {
             browser: None,
             browser_overlay: None,
             video: None,
+            awake: crate::awake::Awake::new(),
             next_frame: None,
             playback_origin: None,
             paused: false,
@@ -1540,6 +1561,9 @@ impl App {
         if !self.playlist.step(delta) {
             return;
         }
+        if delta != 0 {
+            self.step_dir = delta.signum();
+        }
         self.start_current();
     }
 
@@ -1587,7 +1611,40 @@ impl App {
         if !self.config.hold_zoom {
             self.view.fitting = true;
         }
+        // Read ahead already: handed over as if it had just been decoded, so
+        // everything after is the same path a fresh load takes.
+        if let Some((ahead, Some(loaded))) = self.neighbour.take()
+            && ahead == path
+        {
+            let _ = self.proxy.send_event(UserEvent::Preview(self.generation, Box::new(Ok(loaded))));
+            return;
+        }
         spawn_load(&self.proxy, path, self.args.io, self.args.preview, false, self.generation);
+    }
+
+    /// Read the image the next step will land on, once the current one is up.
+    ///
+    /// One image, in the direction of travel, at the same resolution the first
+    /// paint uses, on a low-priority thread: what pressing next would decode
+    /// anyway, done while the person is still looking. A film is never read
+    /// ahead, nor anything bigger than the speculative full-size budget.
+    fn prefetch_neighbour(&mut self) {
+        if self.video.is_some() || self.playlist.len() < 2 {
+            return;
+        }
+        let n = self.playlist.len() as isize;
+        let index = ((self.playlist.position() as isize + self.step_dir) % n + n) % n;
+        let Some(path) = self.playlist.at(index as usize).map(|p| p.to_path_buf()) else { return };
+        if crate::video::is_video(&path) || self.neighbour.as_ref().is_some_and(|(p, _)| *p == path) {
+            return;
+        }
+        self.neighbour = Some((path.clone(), None));
+        let (proxy, io, target) = (self.proxy.clone(), self.args.io, self.args.preview);
+        let _ = std::thread::Builder::new().name("read-ahead".into()).spawn(move || {
+            background_priority();
+            let result = Box::new(loader::load(&path, io, target));
+            let _ = proxy.send_event(UserEvent::Neighbour(path, result));
+        });
     }
 
     fn stop_video(&mut self) {
@@ -4918,7 +4975,18 @@ impl App {
     /// a deep zoom would otherwise fill the screen with two words, and a tiny
     /// window would produce text nobody could read.
     fn caption_size(&self) -> f32 {
-        caption_px(self.picture_height().unwrap_or_else(|| self.win_size().1))
+        caption_px(self.picture_height().unwrap_or_else(|| self.win_size().1)) * self.config.caption_scale
+    }
+
+    /// Ctrl < and >: subtitles a tenth smaller or larger, kept for next time.
+    fn scale_captions(&mut self, steps: i32) {
+        let scale = (self.config.caption_scale * 1.1f32.powi(steps)).clamp(0.5, 3.0);
+        self.config.caption_scale = (scale * 20.0).round() / 20.0;
+        if let Err(e) = self.config.save() {
+            eprintln!("show: could not save the subtitle size: {e:#}");
+        }
+        self.notify(&format!("SUBTITLES {}%", (self.config.caption_scale * 100.0).round() as i32));
+        self.redraw();
     }
 
     /// The picture's height on screen, in window pixels.
@@ -5606,7 +5674,7 @@ impl App {
                 if matches!(corner, Corner::Caption)
                     && let Some(bottom) = picture_bottom
                 {
-                    y = caption_y(bottom, full.1, ov.height as f32);
+                    y = caption_y_scaled(bottom, full.1, ov.height as f32, self.config.caption_scale);
                 }
                 if matches!(corner, Corner::TopLeft | Corner::TopRight) {
                     let cursor = next_y.entry(*corner).or_insert(y);
@@ -5784,6 +5852,7 @@ impl App {
             self.build_status_badge();
             self.redraw();
             self.maybe_prefetch_full_res();
+            self.prefetch_neighbour();
         }
     }
 }
@@ -5794,6 +5863,8 @@ impl ApplicationHandler<UserEvent> for App {
         // Browsing away from a playing video has to be able to interrupt it,
         // so the preview is checked before the frame deadline claims the loop.
         self.tick_pending_preview();
+        // A film is watched, not touched: keep the screen on while one plays.
+        self.awake.set(self.video.is_some() && !self.paused && !self.playback_ended);
         self.update_watch();
         self.tick_subtitles();
         self.tick_backfill();
@@ -6026,6 +6097,17 @@ impl ApplicationHandler<UserEvent> for App {
             }
             UserEvent::FolderChanged => {
                 self.rescan_folder();
+                return;
+            }
+            UserEvent::Neighbour(path, result) => {
+                // Kept only if it is still the one wanted, and not so big that
+                // holding it on spec would crowd out what is on screen.
+                if let (Some((wanted, slot)), Ok(loaded)) = (self.neighbour.as_mut(), *result)
+                    && *wanted == path
+                    && loaded.decoded.rgba.len() as u64 <= SPECULATIVE_FULL_RES_BUDGET
+                {
+                    *slot = Some(loaded);
+                }
                 return;
             }
             UserEvent::Peers => {
@@ -7223,6 +7305,14 @@ impl ApplicationHandler<UserEvent> for App {
                     // Frame at a time, for looking rather than watching.
                     // The comma and full stop keys, as every other player
                     // uses them.
+                    // With ctrl, the subtitle size instead: < and > are the
+                    // same keys shifted.
+                    Key::Character(",") | Key::Character("<") if self.ctrl_held && self.video.is_some() => {
+                        self.scale_captions(-1)
+                    }
+                    Key::Character(".") | Key::Character(">") if self.ctrl_held && self.video.is_some() => {
+                        self.scale_captions(1)
+                    }
                     Key::Character(",") if self.video.is_some() => self.step_frame(false),
                     Key::Character(".") if self.video.is_some() => self.step_frame(true),
 
@@ -7351,7 +7441,19 @@ impl ApplicationHandler<UserEvent> for App {
 
 #[cfg(test)]
 mod caption_tests {
-    use super::{Corner, caption_px, caption_y};
+    use super::{Corner, caption_px, caption_y, caption_y_scaled};
+
+    #[test]
+    fn a_bigger_caption_grows_about_its_middle() {
+        // In the band below the picture, and inside it when there is no band.
+        for bottom in [1260.0, 1440.0] {
+            let usual = caption_y(bottom, 1440.0, 60.0) as f32 + 30.0;
+            let grown = caption_y_scaled(bottom, 1440.0, 90.0, 1.5) as f32 + 45.0;
+            assert!((usual - grown).abs() <= 1.0, "middle moved from {usual} to {grown}");
+        }
+        // Never pushed off the bottom of the window.
+        assert!(caption_y_scaled(1440.0, 1440.0, 400.0, 3.0) + 400 <= 1440);
+    }
 
     #[test]
     fn captions_scale_with_the_picture_not_the_window() {

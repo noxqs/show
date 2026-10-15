@@ -106,9 +106,13 @@ adapter benchmark to the integrated Radeon by 2.2x.
    line. Captions sit in the letterbox band below the picture when there is
    one deep enough, where they cover nothing.
 
-   Still open: no styling, so a sign and a line of dialogue look alike; and
-   cues are retired 30 s behind the play position, which becomes a cache bound
-   to revisit now that seeking exists.
+   Still open: no styling, so a sign and a line of dialogue look alike.
+
+   Only picture captions from a stream in the video are forgotten, 30 s behind
+   a seek: they are the large ones, and seeking back decodes them again. Text,
+   and anything from a file beside the video, is kept for the whole film,
+   since a file is read once and dropping its cues lost them for good on the
+   first seek back. Subtitle size is ctrl < / >, kept in the config.
 
 ## Why playback is three threads
 
@@ -988,14 +992,29 @@ Ordered by payoff, with the measurement that justifies each.
    modification time; 8 GB budget, least recently used dropped first.
 
    Measured on a synthetic 24000x16000 deflate file, 4 cores: the first open
-   goes from 1.3 s to 1.8 s, and memory from 395 MB to 590 MB. Not yet measured
-   on the real files: `show --tiles <file>` reports the first-open time and the
-   stored levels.
+   goes from 1.3 s to 1.8 s, and memory from 395 MB to 590 MB.
+
+   Measured on K11 with `show --tiles`, release build:
+
+   | file | first open, storing | stored levels | fit view | 1/4 view |
+   |---|---|---|---|---|
+   | 1955 mosaic, 52416x34080 | 2.8 s | 7, down to 410x267 | 35 tiles, 2.5 ms | 91 tiles, 7.0 ms |
+   | 1982 plan, 23585x18939 | 1.1 s | 6, down to 369x296 | 30 tiles, 4.1 ms | 91 tiles, 11.6 ms |
+
+   Both together take 105 MB of disk. Later opens probe in 0.1-0.2 ms and read
+   a stored tile in 0.3-1.4 ms. A full-size mosaic tile read in 1.8 ms on K11,
+   not the 10.5 ms first measured, which is why reading all 6,901 of them is
+   seconds rather than the 72 s estimated above. The 1982 plan's own tiles are
+   1024 px against the stored 512, so its level 1 has the same grid as level 0;
+   the planner and the stand-in lookup only assume levels halve, not that tile
+   sizes match.
 2. ~~**Multi-file navigation**~~ — built, along with the detailed view
    (`browser.rs`), the mosaic grid, similarity grouping (`similarity.rs`) and a
    persistent thumbnail cache that also reads the desktop's own
-   (`thumbs.rs`). Neighbour **prefetch** for the single-image view is still
-   open; the grid has its own.
+   (`thumbs.rs`). The single-image view reads the next image ahead once the
+   current one is on screen: one image, in the direction of the last step, at
+   first-paint resolution, on a low-priority thread, and dropped if it is over
+   the speculative full-size budget. Videos are not read ahead.
 3. **Parallel JPEG entropy decode.** Entropy decoding is the floor that DCT
    scaling cannot cut: 84 ms -> 38 ms is the whole range on a 48 MP file.
    Baseline JPEGs with restart markers can be split across cores.

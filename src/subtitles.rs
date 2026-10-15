@@ -369,16 +369,22 @@ impl Subtitles {
             .next_back()
     }
 
-    /// Forget captions well behind the play position.
+    /// Forget picture captions well behind the play position.
     ///
-    /// Without this a long film with two picture-based tracks would keep every
-    /// caption it ever decoded. There is no seeking yet, so anything this far
-    /// back cannot be asked for again; when seeking lands this becomes a cache
-    /// bound rather than a discard.
+    /// Only those are worth forgetting, and only from a stream in the video:
+    /// a film's picture-based track holds megabytes of bitmaps, and one in
+    /// the video comes back by itself, since seeking back has the demuxer read
+    /// its packets again. Text is a few kilobytes for a whole film, and a file
+    /// beside the video is read once, so dropping either would lose captions
+    /// for good the first time someone seeks back past them.
     pub fn retire(&mut self, now: Duration) {
         const KEEP: Duration = Duration::from_secs(30);
         let Some(cutoff) = now.checked_sub(KEEP) else { return };
-        self.cues.retain(|c| c.end >= cutoff);
+        let external: Vec<usize> =
+            self.tracks.iter().filter(|t| t.external.is_some()).map(|t| t.index).collect();
+        self.cues.retain(|c| {
+            c.end >= cutoff || matches!(c.payload, Payload::Lines(_)) || external.contains(&c.track)
+        });
     }
 
     pub fn clear(&mut self) {
@@ -653,6 +659,41 @@ fn language_from_name(path: &Path) -> Option<String> {
 mod tests {
     use super::*;
 
+    fn cue(track: usize, at: u64, payload: Payload) -> Cue {
+        Cue { track, start: Duration::from_secs(at), end: Duration::from_secs(at + 2), payload }
+    }
+
+    fn track(index: usize, external: bool) -> Track {
+        Track {
+            index,
+            kind: Kind::of("subrip").unwrap(),
+            codec: "subrip".into(),
+            language: None,
+            title: None,
+            external: external.then(|| PathBuf::from("film.en.srt")),
+        }
+    }
+
+    #[test]
+    fn seeking_back_keeps_text_and_files_beside_the_video() {
+        let mut subs = Subtitles::new();
+        subs.add_track(track(2, false));
+        subs.add_track(track(1 << 20, true));
+        let picture = || Payload::Images(Vec::new(), (1920, 1080));
+        let words = || Payload::Lines(vec!["hello".into()]);
+        subs.push(cue(2, 10, words()));
+        subs.push(cue(2, 11, picture()));
+        subs.push(cue(1 << 20, 12, picture()));
+        subs.push(cue(1 << 20, 13, words()));
+
+        // A seek an hour in, then back to the start.
+        subs.retire(Duration::from_secs(3600));
+        let kept: Vec<u64> = subs.cues.iter().map(|c| c.start.as_secs()).collect();
+        assert_eq!(kept, [10, 12, 13], "only the embedded picture caption goes");
+        subs.select(Some(1));
+        assert!(subs.at(Duration::from_secs(13)).is_some(), "the file's caption is still there");
+    }
+
     #[test]
     fn dialogue_text_survives_its_own_commas() {
         let line = "Dialogue: 0,0:00:01.00,0:00:03.00,Default,,0,0,0,,Well, hello there";
@@ -842,11 +883,12 @@ mod tests {
 
     #[test]
     fn retiring_keeps_what_is_on_screen() {
+        // Pictures: the only captions retired.
         let mut subs = Subtitles::new();
         subs.add_track(Track {
             index: 0,
-            kind: Kind::Text,
-            codec: "subrip".into(),
+            kind: Kind::Bitmap,
+            codec: "hdmv_pgs_subtitle".into(),
             language: None,
             title: None,
             external: None,
@@ -856,7 +898,7 @@ mod tests {
                 track: 0,
                 start: Duration::from_secs(at),
                 end: Duration::from_secs(at + 2),
-                payload: Payload::Lines(vec![format!("{at}")]),
+                payload: Payload::Images(Vec::new(), (1920, 1080)),
             });
         }
         subs.retire(Duration::from_secs(200));

@@ -8,23 +8,32 @@ commit. When every item in a release section is ticked, bump `version` in
 `Cargo.toml`, move the section's items into the release notes, and push a tag
 `vX.Y.Z`; CI builds and publishes the release from the tag.
 
-Released: **v1.1.0** (2026-10-13).
+Linux only: no other platform is planned.
 
-## v1.2.0 (next)
+Released: **v1.2.0** (2026-10-15), **v1.1.0** (2026-10-13).
+
+## v1.2.0 (released 2026-10-15)
 
 - [x] Tiled / pyramidal renderer: tile cache, draw tiles instead of one texture,
       switch level on zoom, tile readout in the badge (Measured #1).
 - [x] Files without a pyramid: store halved levels on first open, so zooming
       out or in no longer reads every full-size tile (Measured #1).
-- [ ] Measure the stored pyramid on the real files on K11: first open, later
+- [x] Measure the stored pyramid on the real files on K11: first open, later
       opens, disk size (`show --tiles <file>`).
-- [ ] Subtitle cue retention: a backward seek of more than 30 s loses captions;
+- [x] Subtitle cue retention: a backward seek of more than 30 s loses captions;
       replace the fixed `KEEP` window in `src/subtitles.rs` (Next #4).
-- [ ] Neighbour prefetch for the single-image view (Measured #2).
+- [x] Neighbour prefetch for the single-image view (Measured #2).
+- [x] Check on K11 that stepping through a folder feels instant one way and
+      the other.
+- [x] Keep the screensaver off while a video plays (`src/awake.rs`).
+- [x] Check on K11 that the screen stays on through a video, and blanks again
+      when paused.
+- [x] Subtitle size on ctrl < / >, kept between sessions, growing about the
+      caption's middle.
 - [x] Docs: audio clock already re-anchors on seek; update the stale note in
       `BACKLOG.md` (Next #1).
 
-## v1.3.0
+## v1.3.0 (next)
 
 - [ ] Zero-copy hardware frames: VA surface → DMA-BUF → Vulkan, so hardware
       decode stops costing more CPU than software (Next #3).

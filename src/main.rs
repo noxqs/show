@@ -1,6 +1,7 @@
 mod alsa;
 mod app;
 mod audio;
+mod awake;
 mod bench;
 mod browser;
 mod cli;
