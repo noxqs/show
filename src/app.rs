@@ -2764,20 +2764,17 @@ impl App {
         presence.activate(&peers[next].name, self.fullscreen);
     }
 
-    /// Whether a drag on the picture should move the window rather than pan:
-    /// windowed — fullscreen has nowhere to move to — and over a film, or a
-    /// picture shown whole, where a pan would have nothing to move.
+    /// Whether a drag on the picture should move the window rather than pan.
     fn drags_window(&self) -> bool {
-        if self.fullscreen || self.mosaic.is_some() || self.browser.is_some() || self.press_at.is_none() {
-            return false;
-        }
-        if self.video.is_some() {
-            return true;
-        }
-        let Some(shown) = &self.shown else { return false };
-        let (_, _, vw, vh) = self.image_viewport();
-        let (sw, sh) = self.view.oriented(shown.source);
-        sw * self.view.zoom <= vw + 0.5 && sh * self.view.zoom <= vh + 0.5
+        // Windowed, a plain drag anywhere moves the window: picture, film or
+        // empty space alike. Panning is shift + drag. Fullscreen has no window
+        // to move, so there a plain drag pans.
+        !(self.fullscreen
+            || self.shift_held
+            || self.mosaic.is_some()
+            || self.browser.is_some()
+            || self.press_at.is_none())
+            && (self.video.is_some() || self.shown.is_some())
     }
 
     /// Ctrl+C: the picture on screen — or the one selected in the grid — on
@@ -6380,9 +6377,9 @@ impl ApplicationHandler<UserEvent> for App {
                         panel.pan(dx as i32, dy as i32);
                         self.redraw();
                     } else if self.drags_window() {
-                        // Windowed, over a film or a picture with nothing to
-                        // pan: a drag moves the window. Only once it is a drag
-                        // — past the click slop — so a click still pauses.
+                        // Windowed and without shift: a drag moves the window.
+                        // Only once it is a drag — past the click slop — so a
+                        // click still pauses.
                         if !was_click(self.press_at, now) {
                             self.dragging = false;
                             self.press_at = None;
