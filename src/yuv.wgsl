@@ -13,6 +13,9 @@ struct Uniforms {
     row_g: vec4<f32>,
     row_b: vec4<f32>,
     // x subtracted from luma, y from both chroma planes, before the matrix.
+    // z is 1 when chroma is interleaved, Cb and Cr as the red and green of
+    // one texture bound to both chroma slots, as the hardware decoder leaves
+    // it; 0 for separate planes.
     offsets: vec4<f32>,
     // x: quarter turns clockwise.
     turn: vec4<f32>,
@@ -55,7 +58,8 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     // coordinates and a linear filter is the upsample.
     let y = textureSample(plane_y, samp, in.uv).r - u.offsets.x;
     let cb = textureSample(plane_u, samp, in.uv).r - u.offsets.y;
-    let cr = textureSample(plane_v, samp, in.uv).r - u.offsets.y;
+    let v = textureSample(plane_v, samp, in.uv);
+    let cr = mix(v.r, v.g, u.offsets.z) - u.offsets.y;
 
     let ycc = vec3<f32>(y, cb, cr);
     let rgb = vec3<f32>(

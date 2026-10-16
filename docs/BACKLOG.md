@@ -68,11 +68,26 @@ adapter benchmark to the integrated Radeon by 2.2x.
    generation stamp and stale ones are dropped, which is what stops the old
    position appearing after the new one. The seek bar shows on pointer
    movement and fades after 2.5 s.
-3. **Zero-copy hardware frames.** Hardware decode currently reads frames back
-   from the GPU, which costs about what the decode saved — measured at 24% CPU
-   against software's 21% on 4K HEVC. It only pays once the VA surface is
-   exported as a DMA-BUF and imported straight into Vulkan, or once presenting
-   happens on the same device that decoded.
+3. ~~**Zero-copy hardware frames.**~~ **Built**, in `src/dmabuf.rs`. Reading
+   frames back from the GPU cost about what hardware decode saved — measured
+   at 24% CPU against software's 21% on 4K HEVC. Now the VA surface is
+   exported with `vaExportSurfaceHandle` (FFmpeg's own route needs libdrm,
+   which the vendored build lacks), each layer imported as a Vulkan image
+   with its DRM modifier, and copied on the card into textures of our own,
+   so the decoder gets its surface back at once and the three-second
+   read-ahead does not drain its small pool. The device is opened through
+   wgpu-hal with the three import extensions; the decoder's render node must
+   match the display's, checked through VK_EXT_physical_device_drm. Chroma
+   stays interleaved, bound to both chroma slots of the YUV shader.
+   Anything on the CPU that wants the planes (analysis, the software path)
+   reads them back once, lazily, on its own thread. `SHOW_ZERO_COPY=0` turns
+   it off; any failure falls back to reading back, once and quietly.
+
+   Measured on a 3072x1728 H.264 screen recording on the Raphael iGPU: the
+   viewer at **3.0%** of a core against **11.7%** reading back; the headless
+   probe 0.7 s of CPU against 2.2 s. `show --probe` checks the first frame
+   read back from the card against a software decode: identical, to the
+   level, on that file and on 1080p HEVC.
 4. ~~**Subtitles.**~~ **Built**, in `src/subtitles.rs`. Both families: text
    (SRT, ASS/SSA, WebVTT, mov_text) via libavcodec, which hands every one of
    them over as ASS dialogue so there is a single parser; and bitmap (PGS,

@@ -1,6 +1,6 @@
 [package]
 name = "show"
-version = "1.2.0"
+version = "1.3.0"
 edition = "2024"
 description = "The fastest image viewer"
 
@@ -78,6 +78,9 @@ x11rb = { version = "0.13", features = ["allow-unsafe-code", "dl-libxcb"] }
 arboard = { version = "3.6", default-features = false, features = ["image-data"] }
 
 anyhow = "1"
+# Vulkan calls wgpu does not make: importing decoded video frames as
+# DMA-BUFs (src/dmabuf.rs). The same version wgpu-hal uses, so it is one crate.
+ash = "0.38"
 ureq = { version = "3.4.1", default-features = false, features = ["rustls"] }
 flate2 = "1.1.10"
 # `cuda` compiles the code that registers the card's execution provider. It

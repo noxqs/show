@@ -11,7 +11,7 @@ published as a pre-release.
 
 Linux only: no other platform is planned.
 
-Released: **v1.2.0** (2026-10-15), **v1.1.0** (2026-10-13).
+Released: **v1.3.0** (2026-10-16), **v1.2.0** (2026-10-15), **v1.1.0** (2026-10-13).
 
 ## v1.2.0 (released 2026-10-15)
 
@@ -37,9 +37,9 @@ Released: **v1.2.0** (2026-10-15), **v1.1.0** (2026-10-13).
       picture or film. Fullscreen, a plain drag still pans.
 - [x] Releases publish themselves when a new version reaches main.
 
-## v1.3.0 (next)
+## v1.3.0 (released 2026-10-16)
 
-- [ ] Zero-copy hardware frames: VA surface → DMA-BUF → Vulkan, so hardware
+- [x] Zero-copy hardware frames: VA surface → DMA-BUF → Vulkan, so hardware
       decode stops costing more CPU than software (Next #3).
 - [x] Mipmaps, so a large image fitted to the window does not alias
       (Measured #8).

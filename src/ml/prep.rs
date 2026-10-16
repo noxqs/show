@@ -228,7 +228,7 @@ pub fn from_pixels(rgba: &[u8], width: u32, height: u32) -> Option<Frame> {
     Some(Frame {
         key: true,
         generation: 0,
-        planes: [std::sync::Arc::new(y), std::sync::Arc::new(u), std::sync::Arc::new(v)],
+        planes: crate::video::Planes::cpu([std::sync::Arc::new(y), std::sync::Arc::new(u), std::sync::Arc::new(v)]),
         width,
         height,
         chroma,
@@ -254,11 +254,11 @@ mod tests {
         Frame {
             key: true,
             generation: 0,
-            planes: [
+            planes: crate::video::Planes::cpu([
                 std::sync::Arc::new(vec![y; (width * height) as usize]),
                 std::sync::Arc::new(vec![u; (chroma.0 * chroma.1) as usize]),
                 std::sync::Arc::new(vec![v; (chroma.0 * chroma.1) as usize]),
-            ],
+            ]),
             width,
             height,
             chroma,

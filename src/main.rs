@@ -9,6 +9,7 @@ mod config;
 mod crash;
 mod compare;
 mod decode;
+mod dmabuf;
 mod font;
 mod geo;
 mod framecache;
@@ -1064,6 +1065,11 @@ fn probe_playback(path: &std::path::Path) -> anyhow::Result<()> {
 
     println!("alsa: {}", if alsa::available() { "loaded" } else { "NOT AVAILABLE" });
 
+    // A device, so hardware frames can go straight onto the card as they do
+    // in the viewer; held for the whole probe, so every check below runs on
+    // the frames the viewer would get.
+    let _card = check_card(path)?;
+
     let mut player = video::Player::open(path, true)?;
     // A silent file is still worth every check that does not need sound —
     // which is most of them, and more than half the films on this machine are
@@ -1149,6 +1155,78 @@ fn probe_playback(path: &std::path::Path) -> anyhow::Result<()> {
     check_subtitles(&mut player, path)?;
     check_seek(&mut player)?;
     Ok(())
+}
+
+/// Whether hardware frames reach the card without a readback, and whether
+/// what arrives there is the right picture: the first frame, read back from
+/// the card, against the same frame decoded in software. Two decoders differ
+/// by rounding; a wrongly imported surface (the wrong tiling, pitch or plane
+/// order) differs by far more than that.
+fn check_card(path: &std::path::Path) -> anyhow::Result<Option<gpu::Core>> {
+    use std::time::{Duration, Instant};
+
+    let core = match gpu::Core::new_default(None, wgpu::Backends::VULKAN) {
+        Ok(core) => core,
+        Err(e) => {
+            println!("card: no Vulkan device ({e:#}), frames are read back");
+            return Ok(None);
+        }
+    };
+    println!("card: {}", core.adapter_name);
+
+    let first = |hardware: bool| -> anyhow::Result<video::Frame> {
+        let mut player = video::Player::open_video_only(path, hardware)?;
+        let start = Instant::now();
+        loop {
+            if let Some(frame) = player.try_next() {
+                return Ok(frame);
+            }
+            anyhow::ensure!(start.elapsed() < Duration::from_secs(5), "no frame within 5 s");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    };
+
+    let started = Instant::now();
+    let hardware = first(true)?;
+    let Some(card) = hardware.planes.on_card() else {
+        println!("card: frames are read back (not hardware-decoded, or not the GPU that draws)");
+        return Ok(Some(core));
+    };
+    println!(
+        "card: frames imported, {}x{} {:?} + {:?}, first in {:.0} ms",
+        hardware.width,
+        hardware.height,
+        card.y.format(),
+        card.uv.format(),
+        started.elapsed().as_secs_f64() * 1000.0
+    );
+
+    let read = Instant::now();
+    let from_card = [hardware.planes[0].clone(), hardware.planes[1].clone(), hardware.planes[2].clone()];
+    println!("card: read back in {:.1} ms", read.elapsed().as_secs_f64() * 1000.0);
+
+    let software = first(false)?;
+    let differ = |a: &[u8], b: &[u8]| -> f64 {
+        let n = a.len().min(b.len()).max(1);
+        a.iter().zip(b).map(|(x, y)| (*x as f64 - *y as f64).abs()).sum::<f64>() / n as f64
+    };
+    let names = ["luma", "cb", "cr"];
+    let mut worst = 0f64;
+    for i in 0..3 {
+        anyhow::ensure!(
+            from_card[i].len() == software.planes[i].len(),
+            "{} is {} bytes from the card, {} in software",
+            names[i],
+            from_card[i].len(),
+            software.planes[i].len()
+        );
+        let d = differ(&from_card[i], &software.planes[i]);
+        worst = worst.max(d);
+        println!("card: {} differs from software by {d:.2} levels on average", names[i]);
+    }
+    anyhow::ensure!(worst < 4.0, "the frame on the card is not the decoded picture");
+    println!("card: the imported frame matches");
+    Ok(Some(core))
 }
 
 /// Confirm a film starts playing on its own, with nothing pressed.

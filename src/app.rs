@@ -1954,7 +1954,9 @@ impl App {
         if let Some(depth) = self.depth.as_ref() {
             depth.offer(frame, self.generation);
         }
-        if let Some(gpu) = self.gpu.as_mut() {
+        if let (Some(gpu), Some(card)) = (self.gpu.as_mut(), frame.planes.on_card()) {
+            gpu.show_card_yuv(card);
+        } else if let Some(gpu) = self.gpu.as_mut() {
             let planes = [
                 frame.planes[0].as_slice(),
                 frame.planes[1].as_slice(),

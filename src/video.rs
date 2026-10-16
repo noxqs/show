@@ -204,7 +204,9 @@ pub struct Frame {
     /// still in flight when it happens, and showing them would make the
     /// picture jump back before it jumps forward.
     pub generation: u64,
-    /// Luma, then the two chroma planes, each tightly packed.
+    /// Luma, then the two chroma planes, each tightly packed — or, when the
+    /// frame was taken straight from the decoder, textures on the card that
+    /// are read back only if something on the CPU asks for them.
     ///
     /// Reference counted so a frame can be handed to more than one consumer
     /// without copying it. Three megabytes at 1080p is a memcpy nobody
@@ -212,7 +214,7 @@ pub struct Frame {
     /// frame cache holds them, the display uploads them, and analysis wants
     /// them too. `Arc` makes all three free; nothing here ever mutates a
     /// plane after `pack` builds it.
-    pub planes: [std::sync::Arc<Vec<u8>>; 3],
+    pub planes: Planes,
     pub width: u32,
     pub height: u32,
     /// Chroma plane dimensions, which are smaller when subsampled.
@@ -221,6 +223,59 @@ pub struct Frame {
     pub colour: Colour,
     /// When this frame should appear, measured from the start of the file.
     pub at: Duration,
+}
+
+/// A frame's pixels, in memory or on the card.
+///
+/// Dereferences to the three 8-bit 4:2:0 planes. For a frame on the card that
+/// is a readback, done once on whichever thread first asks and kept: the
+/// display never asks, so a film that is only watched never pays it, and
+/// analysis, which does, runs on threads of its own.
+#[derive(Clone, Default)]
+pub struct Planes {
+    cpu: std::sync::Arc<std::sync::OnceLock<[std::sync::Arc<Vec<u8>>; 3]>>,
+    card: Option<std::sync::Arc<crate::dmabuf::CardPlanes>>,
+}
+
+impl Planes {
+    pub fn cpu(planes: [std::sync::Arc<Vec<u8>>; 3]) -> Planes {
+        Planes { cpu: std::sync::Arc::new(std::sync::OnceLock::from(planes)), card: None }
+    }
+
+    fn card(planes: crate::dmabuf::CardPlanes) -> Planes {
+        Planes { cpu: Default::default(), card: Some(std::sync::Arc::new(planes)) }
+    }
+
+    /// The textures, when the frame is on the card.
+    pub fn on_card(&self) -> Option<&std::sync::Arc<crate::dmabuf::CardPlanes>> {
+        self.card.as_ref()
+    }
+
+    /// Bytes the frame occupies, wherever it is, without reading it back.
+    pub fn bytes(&self) -> u64 {
+        match (&self.card, self.cpu.get()) {
+            (Some(card), _) => card.bytes(),
+            (None, Some(planes)) => planes.iter().map(|p| p.len() as u64).sum(),
+            (None, None) => 0,
+        }
+    }
+}
+
+impl std::ops::Deref for Planes {
+    type Target = [std::sync::Arc<Vec<u8>>; 3];
+
+    fn deref(&self) -> &Self::Target {
+        self.cpu.get_or_init(|| {
+            let Some(card) = self.card.as_ref() else { return Default::default() };
+            match card.read_back() {
+                Ok(planes) => planes.map(std::sync::Arc::new),
+                Err(e) => {
+                    eprintln!("show: reading a frame back from the card: {e:#}");
+                    Default::default()
+                }
+            }
+        })
+    }
 }
 
 /// The colour transform a frame needs.
@@ -487,6 +542,7 @@ impl Player {
         let video_ended = ended.clone();
         let video_queued = queued.clone();
         let video_watch = watch.clone();
+        let video_node = info.hardware.clone();
         std::thread::Builder::new()
             .name("video-decode".into())
             .spawn(move || {
@@ -503,6 +559,7 @@ impl Player {
                         video_queued,
                         video_from,
                         video_watch,
+                        Card::new(video_node),
                     )
                 {
                     eprintln!("show: video decoding stopped: {e:#}");
@@ -975,6 +1032,7 @@ fn video_loop(
     queued: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     exact_from: std::sync::Arc<std::sync::atomic::AtomicU64>,
     stop: std::sync::Weak<()>,
+    mut card: Card,
 ) -> Result<()> {
     use std::sync::atomic::Ordering;
 
@@ -1013,6 +1071,7 @@ fn video_loop(
                 // then say so. The thread stays alive for a seek back in.
                 if tag == generation.load(Ordering::Acquire) {
                     flush_decoder(
+                        &mut card,
                         &mut decoder,
                         &mut decoded,
                         &mut downloaded,
@@ -1060,6 +1119,10 @@ fn video_loop(
             // Read before any conversion: a scaled copy is a new frame and
             // does not carry this.
             let key = decoded.is_key();
+            let at = Duration::from_secs_f64(pts.max(0) as f64 * time_base);
+            let mut pending = if let Some(planes) = card.take(&decoded) {
+                card_frame(planes, &decoded, at, colour, tag, key)
+            } else {
             // A hardware frame lives in GPU memory and has to be fetched
             // before anything can read it.
             let decoded = match download(&mut decoded, &mut downloaded) {
@@ -1097,8 +1160,8 @@ fn video_loop(
                 (_, None) => decoded,
             };
 
-            let at = Duration::from_secs_f64(pts.max(0) as f64 * time_base);
-            let mut pending = pack(source, at, colour, tag, key);
+            pack(source, at, colour, tag, key)
+            };
 
             // Blocks once the queue is full, which is the backpressure that
             // keeps a decoder from racing ahead of the screen. Only this
@@ -1132,6 +1195,7 @@ fn video_loop(
 /// Hand over the frames a decoder is still holding at the end of the file.
 #[allow(clippy::too_many_arguments)]
 fn flush_decoder(
+    card: &mut Card,
     decoder: &mut ffmpeg_next::decoder::Video,
     decoded: &mut ffmpeg_next::util::frame::Video,
     downloaded: &mut ffmpeg_next::util::frame::Video,
@@ -1146,6 +1210,13 @@ fn flush_decoder(
     while decoder.receive_frame(decoded).is_ok() {
         let pts = decoded.pts().unwrap_or(0);
         let key = decoded.is_key();
+        let at = Duration::from_secs_f64(pts.max(0) as f64 * time_base);
+        if let Some(planes) = card.take(decoded) {
+            if sender.send(card_frame(planes, decoded, at, colour, tag, key)).is_err() {
+                break;
+            }
+            continue;
+        }
         let Ok(frame) = download(decoded, downloaded) else { break };
         let source = match (frame.format(), scaler.as_deref_mut()) {
             (ffmpeg_next::format::Pixel::YUV420P, _) => frame,
@@ -1157,7 +1228,6 @@ fn flush_decoder(
             }
             (_, None) => frame,
         };
-        let at = Duration::from_secs_f64(pts.max(0) as f64 * time_base);
         if sender.send(pack(source, at, colour, tag, key)).is_err() {
             break;
         }
@@ -1248,14 +1318,75 @@ fn pack(
     Frame {
         key,
         generation,
-        planes: [
+        planes: Planes::cpu([
             std::sync::Arc::new(plane(0, width, height)),
             std::sync::Arc::new(plane(1, chroma.0, chroma.1)),
             std::sync::Arc::new(plane(2, chroma.0, chroma.1)),
-        ],
+        ]),
         width,
         height,
         chroma,
+        colour,
+        at,
+    }
+}
+
+/// Where hardware frames go when the decoder and the display share a GPU:
+/// straight onto the card, rather than back through memory.
+struct Card {
+    /// The render node decoding, when it is hardware at all.
+    node: Option<String>,
+    interop: Option<crate::dmabuf::Interop>,
+    /// Set by the first failure, after which every frame is read back: one
+    /// that fails will fail again, and saying so once is enough.
+    failed: bool,
+}
+
+impl Card {
+    fn new(node: Option<String>) -> Card {
+        Card { node, interop: None, failed: false }
+    }
+
+    /// The frame on the card, or `None` to read it back instead.
+    fn take(&mut self, decoded: &ffmpeg_next::util::frame::Video) -> Option<Planes> {
+        if self.failed || decoded.format() != ffmpeg_next::format::Pixel::VAAPI {
+            return None;
+        }
+        // Looked for until found: the film can start before the window's
+        // device exists, and its first frames are read back meanwhile.
+        if self.interop.is_none() {
+            self.interop = crate::dmabuf::for_node(self.node.as_deref()?);
+        }
+        let interop = self.interop.as_ref()?;
+        // Safety: checked above to be a VA-API frame.
+        match unsafe { interop.take(decoded.as_ptr()) } {
+            Ok(planes) => Some(Planes::card(planes)),
+            Err(e) => {
+                eprintln!("show: video frames are read back instead of imported: {e:#}");
+                self.failed = true;
+                None
+            }
+        }
+    }
+}
+
+/// A frame whose pixels are on the card.
+fn card_frame(
+    planes: Planes,
+    decoded: &ffmpeg_next::util::frame::Video,
+    at: Duration,
+    colour: Colour,
+    generation: u64,
+    key: bool,
+) -> Frame {
+    let (width, height) = (decoded.width(), decoded.height());
+    Frame {
+        key,
+        generation,
+        planes,
+        width,
+        height,
+        chroma: (width.div_ceil(2), height.div_ceil(2)),
         colour,
         at,
     }
@@ -1357,11 +1488,11 @@ mod tests {
         let frame = Frame {
             key: true,
             generation: 0,
-            planes: [
+            planes: Planes::cpu([
                 std::sync::Arc::new(vec![7u8; 1024]),
                 std::sync::Arc::new(vec![8u8; 256]),
                 std::sync::Arc::new(vec![9u8; 256]),
-            ],
+            ]),
             width: 32,
             height: 32,
             chroma: (16, 16),

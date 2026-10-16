@@ -59,7 +59,7 @@ impl FrameCache {
 
     /// Bytes one frame occupies.
     fn size_of(frame: &Frame) -> u64 {
-        frame.planes.iter().map(|p| p.len() as u64).sum()
+        frame.planes.bytes()
     }
 
     #[cfg(test)]
@@ -221,11 +221,11 @@ mod tests {
         Frame {
             key: false,
             generation: 0,
-            planes: [
+            planes: crate::video::Planes::cpu([
                 std::sync::Arc::new(vec![0u8; bytes]),
                 std::sync::Arc::new(Vec::new()),
                 std::sync::Arc::new(Vec::new()),
-            ],
+            ]),
             width: 2,
             height: 2,
             chroma: (1, 1),

@@ -152,14 +152,25 @@ impl Core {
         let (device, queue) = {
             let mut s = timing::span("gpu", "device");
             s.note(format!("max_texture={max_texture}"));
-            pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            // 16-bit planes, for 10-bit video taken straight from the decoder.
+            let deep = adapter.features() & wgpu::Features::TEXTURE_FORMAT_16BIT_NORM;
+            let desc = wgpu::DeviceDescriptor {
                 label: Some("show"),
-                required_features: wgpu::Features::empty(),
+                required_features: deep,
                 required_limits: limits,
                 memory_hints: wgpu::MemoryHints::Performance,
                 trace: wgpu::Trace::Off,
-            }))
-            .context("requesting device")?
+            };
+            // With the extensions that let decoded video frames be imported,
+            // where the adapter has them; otherwise exactly as before.
+            match crate::dmabuf::request_device(&adapter, &desc) {
+                Some((device, queue)) => {
+                    s.note("video import");
+                    crate::dmabuf::install(&device, &queue, true);
+                    (device, queue)
+                }
+                None => pollster::block_on(adapter.request_device(&desc)).context("requesting device")?,
+            }
         };
 
         Ok(Core { instance, adapter, device, queue, max_texture, adapter_name, mips: Default::default() })
@@ -504,6 +515,9 @@ pub struct YuvFrame {
     chroma: (u32, u32),
     uniforms: wgpu::Buffer,
     bind: wgpu::BindGroup,
+    /// Chroma as one two-channel texture, Cb in red and Cr in green: a frame
+    /// taken straight from the decoder, bound as both chroma planes.
+    interleaved: bool,
 }
 
 /// The pipeline, samplers and uniform buffer for one target format.
@@ -777,7 +791,41 @@ impl Renderer {
             ],
         });
 
-        YuvFrame { y, u, v, size, chroma, uniforms, bind }
+        YuvFrame { y, u, v, size, chroma, uniforms, bind, interleaved: false }
+    }
+
+    /// Draw a frame whose planes are already on the card. Nothing is copied:
+    /// the textures are bound as they are, the chroma one in both slots.
+    pub fn card_yuv(&self, core: &Core, planes: &crate::dmabuf::CardPlanes) -> YuvFrame {
+        let view = |t: &wgpu::Texture| t.create_view(&wgpu::TextureViewDescriptor::default());
+        let uniforms = core.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("yuv uniforms"),
+            size: std::mem::size_of::<YuvUniforms>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let (luma, chroma) = (view(&planes.y), view(&planes.uv));
+        let bind = core.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("card yuv"),
+            layout: &self.yuv_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: uniforms.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&luma) },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&chroma) },
+                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&chroma) },
+                wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::Sampler(&self.linear) },
+            ],
+        });
+        YuvFrame {
+            y: planes.y.clone(),
+            u: planes.uv.clone(),
+            v: planes.uv.clone(),
+            size: (planes.y.width(), planes.y.height()),
+            chroma: (planes.uv.width(), planes.uv.height()),
+            uniforms,
+            bind,
+            interleaved: true,
+        }
     }
 
     pub fn bind(&self, device: &wgpu::Device, view: &wgpu::TextureView) -> Bound {
@@ -1092,8 +1140,10 @@ impl Gpu {
         size: (u32, u32),
         chroma: (u32, u32),
     ) {
-        let matches =
-            self.yuv.as_ref().is_some_and(|f| f.size == size && f.chroma == chroma);
+        let matches = self
+            .yuv
+            .as_ref()
+            .is_some_and(|f| f.size == size && f.chroma == chroma && !f.interleaved);
         if !matches {
             self.yuv = Some(self.renderer.make_yuv(&self.core, size, chroma));
             // Planes replace the image; whichever was set last is what draws.
@@ -1257,10 +1307,16 @@ impl Gpu {
                 row_r: pad(rows[0]),
                 row_g: pad(rows[1]),
                 row_b: pad(rows[2]),
-                offsets: [offsets[0], offsets[1], 0.0, 0.0],
+                offsets: [offsets[0], offsets[1], if frame.interleaved { 1.0 } else { 0.0 }, 0.0],
                 turn: [self.turn as f32, 0.0, 0.0, 0.0],
             }),
         );
+    }
+
+    /// Show a frame whose planes are on the card already.
+    pub fn show_card_yuv(&mut self, planes: &crate::dmabuf::CardPlanes) {
+        self.yuv = Some(self.renderer.card_yuv(&self.core, planes));
+        self.image = None;
     }
 
     pub fn clear_yuv(&mut self) {
